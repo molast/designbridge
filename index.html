@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>DesignBridge</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">DB</span>
+          <div>
+            <strong>DesignBridge</strong>
+            <span>蓝湖资源抓取</span>
+          </div>
+        </div>
+        <div class="app-status" id="app-status">
+          <span class="status-dot"></span>
+          <span>就绪</span>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="sidebar">
+          <div class="sidebar-heading">
+            <span>抓取记录</span>
+            <span class="history-count" id="history-count">0</span>
+          </div>
+          <div class="history-list" id="history-list"></div>
+        </aside>
+
+        <main class="main-content">
+          <section class="capture-tool" aria-labelledby="capture-title">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">IMPORT</p>
+                <h1 id="capture-title">抓取蓝湖设计稿</h1>
+              </div>
+              <button class="secondary-button hidden" id="open-folder-button" type="button">
+                打开本地目录
+              </button>
+            </div>
+
+            <form class="capture-form" id="capture-form">
+              <label for="lanhu-url">蓝湖链接</label>
+              <div class="url-row">
+                <input
+                  id="lanhu-url"
+                  name="lanhu-url"
+                  type="url"
+                  inputmode="url"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="https://lanhuapp.com/link/#/invite?sid=..."
+                  required
+                />
+                <button class="primary-button" id="capture-button" type="submit">
+                  开始抓取
+                </button>
+                <button class="secondary-button hidden" id="cancel-button" type="button">
+                  取消
+                </button>
+              </div>
+              <p class="field-error hidden" id="field-error" role="alert"></p>
+            </form>
+
+            <div class="progress-panel hidden" id="progress-panel" aria-live="polite">
+              <div class="progress-copy">
+                <span id="progress-message">正在连接蓝湖…</span>
+                <span id="progress-value">0%</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-bar" id="progress-bar"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="results-section" aria-labelledby="results-title">
+            <div class="results-header">
+              <div>
+                <p class="eyebrow">CAPTURE</p>
+                <h2 id="results-title">设计稿</h2>
+              </div>
+              <div class="result-meta" id="result-meta"></div>
+            </div>
+            <div class="empty-state" id="empty-state">
+              <div class="empty-grid" aria-hidden="true">
+                <span></span><span></span><span></span><span></span>
+              </div>
+              <strong>暂无抓取结果</strong>
+              <span>抓取完成的画板会显示在这里</span>
+            </div>
+            <div class="design-grid hidden" id="design-grid"></div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <dialog class="preview-dialog" id="preview-dialog">
+      <button class="close-button" id="close-preview" type="button" aria-label="关闭预览">×</button>
+      <img id="preview-image" alt="" />
+      <div class="preview-caption">
+        <strong id="preview-title"></strong>
+        <span id="preview-size"></span>
+      </div>
+    </dialog>
+  </body>
+</html>
