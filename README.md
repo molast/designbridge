@@ -1,89 +1,105 @@
 # DesignBridge
 
-DesignBridge 是一个用于抓取蓝湖设计稿原图的 Tauri 桌面工具。粘贴蓝湖分享链接后，应用会
-打开独立授权窗口，复用该窗口的蓝湖登录态读取画板列表，并将原图与项目元数据保存到应用
-数据目录。蓝湖接口探测、设计 JSON 解析、资源下载和图片转换均由 Rust 端完成，WebView
-只负责蓝湖页面渲染和登录。
+DesignBridge 是一个蓝湖设计稿读取工具。输入蓝湖设计稿链接后，它会在本地保存画板、图层、样式、切图和评论，并可通过 MCP 将这些信息提供给 Codex，用于更准确地还原 UI。
 
-## 开发
+## 开始使用
 
-```bash
-pnpm install
-pnpm tauri dev
-```
-
-也可以在项目根目录直接运行一键启动脚本：
+在项目根目录运行一键启动脚本：
 
 ```bash
 ./start.sh
-# 或
-pnpm start
 ```
 
-脚本会自动切换到项目目录，并在依赖缺失时执行 `pnpm install`。
+脚本会自动进入项目目录、检查依赖并启动 DesignBridge，无需再手动执行其他启动命令。
 
-当前版本支持蓝湖 UI 设计项目的项目名、画板名称、尺寸、更新时间、原始设计图、可检查图层
-和有效切图抓取，并在 `mipmap-xxhdpi` 目录输出 WebP。登录信息只保存在系统 WebView 的
-站点数据中，不会写入抓取结果。
+> 如果提示“未找到 pnpm”，请先在电脑上准备好 pnpm 和 Rust 开发环境。项目依赖缺失时，启动脚本会自动安装。
 
-## MCP（第一版）
+## 抓取蓝湖设计稿
 
-项目包含一个基于 STDIO 的只读 MCP 服务，供 Codex 或其他 MCP 客户端读取已经抓取的设计稿、图层、截图和切图。服务不要求 Tauri 窗口保持打开，也不会再次请求蓝湖；它直接读取 DesignBridge 的应用数据目录：
+1. 在蓝湖中打开需要查看的具体设计稿，复制浏览器地址栏中的完整链接。
+2. 启动 DesignBridge，将链接粘贴到顶部输入框。
+3. 点击“开始抓取”。
+4. DesignBridge 会打开蓝湖授权窗口。已经登录时只需等待；未登录时在窗口中完成登录。
+5. 授权窗口自动关闭后，等待顶部状态显示抓取完成。
+6. 抓取结果会出现在左侧列表中，点击记录即可重新打开。
 
-- macOS：`~/Library/Application Support/com.designbridge.app/captures`
-- 其他系统：系统应用数据目录下的 `com.designbridge.app/captures`
+同一个设计稿链接只保留一条记录。再次抓取时，如果本地数据已经是最新版本，DesignBridge 会直接定位并选中原记录；旧版数据会自动重新抓取并替换。抓取失败的记录可以点击“重试”。
 
-运行服务：
+## 查看设计稿
+
+抓取完成后，中间画板会显示完整设计稿：
+
+- 按住设计稿拖动，可以自由移动画板。
+- 使用顶部的加减按钮或百分比输入框调整缩放，范围为 `4%` 到 `400%`。
+- 鼠标滚轮用于上下移动画板，触控板双指缩放用于放大或缩小。
+- 将鼠标移到可检查区域会显示手形光标，点击后右侧显示该图层的尺寸、位置、颜色、字体、圆角和效果等信息。
+- 同一位置存在多个图层时，继续点击该位置可以逐层向下选择。
+- 虚线框表示该图层有可导出的切图。
+- 蓝色数字气泡表示该位置有蓝湖评论，点击即可查看评论作者、日期、版本和内容。
+- 点击画板外部会取消当前选择并关闭详情。
+
+左侧记录栏可以收起、展开或拖动边缘调整宽度。删除按钮会同时删除该条抓取记录及其本地文件。
+
+## 导出切图
+
+1. 点击画板上带虚线框的图层。
+2. 在右侧切图区域确认预览和切图名称。
+3. 选择格式：`PNG`、`JPG` 或 `WEBP`。
+4. 选择平台：`Android` 或 `iOS`。
+5. 选择需要的 Android density 或 iOS scale。
+6. 点击“下载切图”。
+7. 导出完成后点击“打开导出目录”。
+
+空像素图片、完全透明图片和 `1 x 1px` 无效切图会被自动过滤。切图预览图片可以点击查看大图。
+
+## 使用 MCP 还原 UI
+
+MCP 只读取已经由 DesignBridge 抓取并保存在本机的数据，不会自行登录蓝湖，也不会重新请求蓝湖。
+
+### 首次配置
+
+只需配置一次。在项目根目录执行：
 
 ```bash
-./mcp.sh
-# 或
-pnpm mcp
+codex mcp add designbridge -- "$PWD/mcp.sh"
 ```
 
-如需使用其他抓取目录，可以设置 `DESIGNBRIDGE_CAPTURES_DIR`：
+配置完成后重启 Codex。以后不需要手动运行 `mcp.sh`，Codex 会在需要时自动启动 MCP 服务。
 
-```bash
-DESIGNBRIDGE_CAPTURES_DIR=/path/to/captures ./mcp.sh
-```
+### 日常使用
 
-### 配置 Codex
+1. 在 DesignBridge 中打开已经抓取的设计稿。
+2. 点击画板顶部的“MCP 链接”按钮，链接会自动复制。
+3. 将 MCP 链接、需要实现的局部截图和具体要求一起发给 Codex。
+4. Codex 会读取对应位置的图层、样式、切图和评论，再根据这些信息实现 UI。
 
-在项目根目录执行以下命令，将本地服务注册到 Codex：
-
-```bash
-codex mcp add designbridge -- /绝对路径/DesignBridge/mcp.sh
-```
-
-也可以在 Codex 配置中加入：
-
-```toml
-[mcp_servers.designbridge]
-command = "/绝对路径/DesignBridge/mcp.sh"
-startup_timeout_sec = 30
-tool_timeout_sec = 60
-```
-
-### 工具和调用顺序
-
-服务提供 7 个只读工具：
-
-- `list_designs`：列出本机已抓取的设计稿和稳定链接。
-- `resolve_design`：解析 `designbridge://` 或蓝湖原始链接，返回画板尺寸、图层数和切图数。
-- `get_design_context`：按 `nodeId`、设计坐标 `rect` 或浅层级树读取图层 frame、文本和样式。
-- `find_layers`：按设计坐标点、矩形或文本查找图层；点查询会优先返回有切图的图层。
-- `get_design_screenshot`：返回整张设计稿，或按设计坐标裁剪后的截图。
-- `get_assets`：返回指定图层关联的切图元数据和图片内容。
-- `get_comments`：返回设计稿评论的作者、正文、版本、设计坐标、状态、回复，以及评论位置命中的候选 UI 图层。
-
-实现 UI 时建议先调用 `resolve_design`，再用用户提供的局部坐标调用 `find_layers` 或 `get_design_context`。需要视觉核对时调用 `get_design_screenshot`，设计评审信息使用 `get_comments`，最后只针对实际需要的图层调用 `get_assets`。所有 frame 和裁剪坐标均使用返回的设计坐标空间（当前 Android 设计稿为 `dp`）。
-
-设计稿工具栏中的“复制 MCP 链接”按钮会复制当前画板的稳定链接，例如：
+示例需求：
 
 ```text
+请根据这个设计稿实现截图中的 UI：
 designbridge://design/{projectId}/{imageId}
+
+需要考虑该区域的蓝湖评论，并使用设计稿中的切图。
 ```
 
-## Recommended IDE Setup
+评论会带有准确的设计坐标和该位置命中的候选 UI 图层。例如评论中指定了夜间颜色时，Codex 可以同时读取评论内容与对应位置的图层样式，将评论作为实现约束，而不是当作普通备注忽略。
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## 本地数据与登录信息
+
+- 设计稿、图层、切图和评论保存在 DesignBridge 的本地应用数据目录。
+- macOS 默认目录为 `~/Library/Application Support/com.designbridge.app/captures`。
+- 蓝湖登录信息只保存在系统 WebView 的站点数据中，不会写入抓取结果。
+- 蓝湖接口请求、设计数据解析、资源下载和图片转换均由 Rust 端完成；前端只负责界面展示与交互。
+- MCP 服务为只读服务，不会修改设计稿、评论或本地抓取记录。
+
+## 当前支持
+
+- 蓝湖单个设计稿原图抓取
+- 设计画板和图层坐标读取
+- 图层颜色、边框、圆角、阴影、模糊和文本样式读取
+- 多段富文本样式读取
+- 有效切图识别、预览和批量下载
+- Android 与 iOS 切图尺寸导出
+- PNG、JPG 与 WEBP 格式转换
+- 蓝湖评论内容、版本和位置读取
+- 基于设计稿链接的只读 MCP 查询
