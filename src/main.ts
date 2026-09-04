@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { mountPhotoPreview, showPhotoPreview, type PreviewItem } from "./photo-preview";
 
 type CaptureProgress = {
   captureId: string;
@@ -72,11 +73,8 @@ const historyList = document.querySelector<HTMLElement>("#history-list")!;
 const resultMeta = document.querySelector<HTMLElement>("#result-meta")!;
 const emptyState = document.querySelector<HTMLElement>("#empty-state")!;
 const designGrid = document.querySelector<HTMLElement>("#design-grid")!;
-const previewDialog = document.querySelector<HTMLDialogElement>("#preview-dialog")!;
-const previewImage = document.querySelector<HTMLImageElement>("#preview-image")!;
-const previewTitle = document.querySelector<HTMLElement>("#preview-title")!;
-const previewSize = document.querySelector<HTMLElement>("#preview-size")!;
-const closePreview = document.querySelector<HTMLButtonElement>("#close-preview")!;
+const previewRoot = document.querySelector<HTMLElement>("#preview-root")!;
+mountPhotoPreview(previewRoot);
 
 let activeCaptureId: string | null = null;
 let selectedCapture: CaptureResult | null = null;
@@ -104,9 +102,9 @@ function displayDate(timestamp: number): string {
   }).format(new Date(timestamp * 1000));
 }
 
-function designSize(design: CapturedDesign): string {
-  if (design.width == null || design.height == null) return "尺寸未知";
-  return `${Math.round(design.width)} × ${Math.round(design.height)}`;
+function imageSize(width: number | null, height: number | null): string {
+  if (width == null || height == null) return "尺寸未知";
+  return `${Math.round(width)} × ${Math.round(height)} px`;
 }
 
 function imageSource(design: CapturedDesign): string {
@@ -115,6 +113,88 @@ function imageSource(design: CapturedDesign): string {
 
 function sliceSource(slice: CapturedSlice): string {
   return slice.localPath ? convertFileSrc(slice.localPath) : slice.remoteUrl;
+}
+
+function imageFormat(localPath: string | null, remoteUrl: string): string {
+  const path = (localPath || remoteUrl).split(/[?#]/, 1)[0];
+  const extension = path.match(/\.([a-z0-9]+)$/i)?.[1];
+  return extension ? extension.toUpperCase() : "未知";
+}
+
+function sliceDensity(slice: CapturedSlice): string {
+  const pathParts = slice.outputDir.replace(/\\/g, "/").split("/").filter(Boolean);
+  const directory = pathParts[pathParts.length - 1];
+  return directory || "mipmap-xxhdpi";
+}
+
+function imageDetails(
+  key: string,
+  name: string,
+  width: number | null,
+  height: number | null,
+  format: string,
+  resourceLabel: string,
+  resourceValue: string,
+): string {
+  return `
+    <span class="image-hover-details" aria-hidden="true">
+      <strong>${escapeHtml(name)}</strong>
+      <span class="image-hover-specs">
+        <span><small>尺寸</small><b data-image-size="${key}">${imageSize(width, height)}</b></span>
+        <span><small>格式</small><b>${escapeHtml(format)}</b></span>
+        <span><small>${escapeHtml(resourceLabel)}</small><b>${escapeHtml(resourceValue)}</b></span>
+      </span>
+    </span>
+  `;
+}
+
+function syncRenderedImageSizes(capture: CaptureResult) {
+  designGrid.querySelectorAll<HTMLImageElement>("img[data-image-kind][data-image-index]").forEach((image) => {
+    const updateSize = () => {
+      if (!image.naturalWidth || !image.naturalHeight) return;
+
+      const kind = image.dataset.imageKind;
+      const index = Number(image.dataset.imageIndex);
+      const item = kind === "slice" ? capture.slices[index] : capture.designs[index];
+      if (!item) return;
+
+      if (kind === "slice" || item.width == null || item.height == null) {
+        item.width = image.naturalWidth;
+        item.height = image.naturalHeight;
+      }
+      designGrid.querySelectorAll<HTMLElement>(`[data-image-size="${kind}-${index}"]`).forEach((element) => {
+        element.textContent = imageSize(item.width, item.height);
+      });
+    };
+
+    if (image.complete) updateSize();
+    else image.addEventListener("load", updateSize, { once: true });
+  });
+}
+
+function previewItems(capture: CaptureResult): PreviewItem[] {
+  return [
+    ...capture.designs.flatMap((design, index) =>
+      design.error
+        ? []
+        : [{
+            key: `design-${index}`,
+            src: imageSource(design),
+            title: design.name,
+            detail: `尺寸 ${imageSize(design.width, design.height)} · 格式 ${imageFormat(design.localPath, design.remoteUrl)} · 类型 原始画板`,
+          }],
+    ),
+    ...capture.slices.flatMap((slice, index) =>
+      slice.error
+        ? []
+        : [{
+            key: `slice-${index}`,
+            src: sliceSource(slice),
+            title: slice.name,
+            detail: `尺寸 ${imageSize(slice.width, slice.height)} · 格式 ${slice.outputFormat.toUpperCase()} · 目录 ${sliceDensity(slice)}`,
+          }],
+    ),
+  ];
 }
 
 function setStatus(label: string, tone: "idle" | "working" | "success" | "error" = "idle") {
@@ -158,20 +238,39 @@ function renderHistory() {
   historyList.innerHTML = history
     .map(
       (capture) => `
-        <button
-          class="history-item${selectedCapture?.captureId === capture.captureId ? " active" : ""}"
-          type="button"
-          data-capture-id="${escapeHtml(capture.captureId)}"
-        >
-          <span class="history-thumbnail-count">${capture.downloadedCount}</span>
-          <span class="history-copy">
-            <strong>${escapeHtml(capture.projectName)}</strong>
-            <span>${displayDate(capture.capturedAt)}</span>
-          </span>
-        </button>
+        <div class="history-item${selectedCapture?.captureId === capture.captureId ? " active" : ""}">
+          <button
+            class="history-select"
+            type="button"
+            data-capture-id="${escapeHtml(capture.captureId)}"
+          >
+            <span class="history-thumbnail-count">${capture.downloadedCount}</span>
+            <span class="history-copy">
+              <strong>${escapeHtml(capture.projectName)}</strong>
+              <span>${displayDate(capture.capturedAt)}</span>
+            </span>
+          </button>
+          <button
+            class="history-delete"
+            type="button"
+            data-delete-capture-id="${escapeHtml(capture.captureId)}"
+            aria-label="删除 ${escapeHtml(capture.projectName)}"
+            title="删除抓取记录"
+          >×</button>
+        </div>
       `,
     )
     .join("");
+}
+
+function renderEmptyCapture() {
+  selectedCapture = null;
+  openFolderButton.classList.add("hidden");
+  resultMeta.innerHTML = "";
+  designGrid.innerHTML = "";
+  designGrid.classList.add("hidden");
+  emptyState.classList.remove("hidden");
+  renderHistory();
 }
 
 function renderCapture(capture: CaptureResult) {
@@ -198,44 +297,52 @@ function renderCapture(capture: CaptureResult) {
     .map((design, index) => {
       const source = escapeHtml(imageSource(design));
       const failed = design.error != null;
+      const key = `design-${index}`;
+      const format = imageFormat(design.localPath, design.remoteUrl);
       return `
         <article class="design-item${failed ? " failed" : ""}">
-          <button class="design-preview" type="button" data-design-index="${index}" ${failed ? "disabled" : ""}>
+          <button class="design-preview" type="button" data-preview-kind="design" data-preview-index="${index}" aria-label="预览 ${escapeHtml(design.name)}" ${failed ? "disabled" : ""}>
             ${
               failed
                 ? `<span class="image-failure">${escapeHtml(design.error || "下载失败")}</span>`
-                : `<img src="${source}" alt="${escapeHtml(design.name)}" loading="lazy" />`
+                : `<img src="${source}" alt="${escapeHtml(design.name)}" loading="lazy" data-image-kind="design" data-image-index="${index}" />
+                  ${imageDetails(key, design.name, design.width, design.height, format, "类型", "原始画板")}`
             }
           </button>
           <div class="design-caption">
             <strong title="${escapeHtml(design.name)}">${escapeHtml(design.name)}</strong>
-            <span>${designSize(design)}</span>
+            <span data-image-size="${key}">${imageSize(design.width, design.height)}</span>
           </div>
         </article>
       `;
     })
     .join("");
   const sliceCards = capture.slices
-    .map((slice) => {
+    .map((slice, index) => {
       const failed = slice.error != null;
+      const key = `slice-${index}`;
+      const density = sliceDensity(slice);
+      const format = slice.outputFormat.toUpperCase();
       return `
         <article class="design-item slice-item${failed ? " failed" : ""}">
-          <div class="design-preview">
+          <button class="design-preview" type="button" data-preview-kind="slice" data-preview-index="${index}" aria-label="预览 ${escapeHtml(slice.name)}" ${failed ? "disabled" : ""}>
             ${
               failed
                 ? `<span class="image-failure">${escapeHtml(slice.error || "导出失败")}</span>`
-                : `<img src="${escapeHtml(sliceSource(slice))}" alt="${escapeHtml(slice.name)}" loading="lazy" />`
+                : `<img src="${escapeHtml(sliceSource(slice))}" alt="${escapeHtml(slice.name)}" loading="lazy" data-image-kind="slice" data-image-index="${index}" />
+                  ${imageDetails(key, slice.name, slice.width, slice.height, format, "目录", density)}`
             }
-          </div>
+          </button>
           <div class="design-caption">
             <strong title="${escapeHtml(slice.name)}">${escapeHtml(slice.name)}</strong>
-            <span>${slice.outputFormat.toUpperCase()} / mipmap-xxhdpi</span>
+            <span>${format} / ${escapeHtml(density)}</span>
           </div>
         </article>
       `;
     })
     .join("");
   designGrid.innerHTML = `${designCards}${sliceCards}`;
+  syncRenderedImageSizes(capture);
 }
 
 async function startCapture() {
@@ -294,7 +401,32 @@ openFolderButton.addEventListener("click", async () => {
   }
 });
 
-historyList.addEventListener("click", (event) => {
+historyList.addEventListener("click", async (event) => {
+  const deleteTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-delete-capture-id]");
+  if (deleteTarget) {
+    const captureId = deleteTarget.dataset.deleteCaptureId;
+    const capture = history.find((item) => item.captureId === captureId);
+    if (!capture || !window.confirm(`确定删除“${capture.projectName}”及其本地图片吗？`)) return;
+
+    deleteTarget.disabled = true;
+    try {
+      await invoke("delete_saved_capture", { captureId: capture.captureId });
+      const deletedSelected = selectedCapture?.captureId === capture.captureId;
+      history = history.filter((item) => item.captureId !== capture.captureId);
+      if (deletedSelected) {
+        if (history[0]) renderCapture(history[0]);
+        else renderEmptyCapture();
+      } else {
+        renderHistory();
+      }
+      setStatus("记录已删除", "success");
+    } catch (error) {
+      deleteTarget.disabled = false;
+      showError(`删除失败：${String(error)}`);
+    }
+    return;
+  }
+
   const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-capture-id]");
   if (!target) return;
   const capture = history.find((item) => item.captureId === target.dataset.captureId);
@@ -302,21 +434,14 @@ historyList.addEventListener("click", (event) => {
 });
 
 designGrid.addEventListener("click", (event) => {
-  const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-design-index]");
+  const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-preview-kind][data-preview-index]");
   if (!target || !selectedCapture) return;
-  const design = selectedCapture.designs[Number(target.dataset.designIndex)];
-  if (!design || design.error) return;
-
-  previewImage.src = imageSource(design);
-  previewImage.alt = design.name;
-  previewTitle.textContent = design.name;
-  previewSize.textContent = designSize(design);
-  previewDialog.showModal();
-});
-
-closePreview.addEventListener("click", () => previewDialog.close());
-previewDialog.addEventListener("click", (event) => {
-  if (event.target === previewDialog) previewDialog.close();
+  const index = Number(target.dataset.previewIndex);
+  const kind = target.dataset.previewKind === "slice" ? "slice" : "design";
+  const items = previewItems(selectedCapture);
+  const itemIndex = items.findIndex((item) => item.key === `${kind}-${index}`);
+  if (itemIndex < 0) return;
+  showPhotoPreview({ items, index: itemIndex });
 });
 
 async function initialize() {

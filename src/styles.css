@@ -180,19 +180,28 @@ button:disabled {
 }
 
 .history-item {
+  position: relative;
   width: 100%;
   min-width: 0;
   height: 54px;
-  display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
-  align-items: center;
-  gap: 9px;
-  padding: 7px 9px;
-  text-align: left;
   color: var(--text);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 6px;
+}
+
+.history-select {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 7px 40px 7px 9px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
 }
 
 .history-item:hover {
@@ -203,6 +212,35 @@ button:disabled {
   background: var(--surface);
   border-color: #d7dad5;
   box-shadow: 0 1px 2px rgba(18, 22, 18, 0.04);
+}
+
+.history-delete {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #747974;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  font-size: 17px;
+  line-height: 1;
+  opacity: 0;
+  transform: translateY(-50%);
+}
+
+.history-item:hover .history-delete,
+.history-delete:focus-visible {
+  opacity: 1;
+}
+
+.history-delete:hover:not(:disabled) {
+  color: var(--red);
+  background: #f7e8e5;
 }
 
 .history-thumbnail-count {
@@ -473,6 +511,7 @@ h2 {
 }
 
 .design-preview {
+  position: relative;
   width: 100%;
   aspect-ratio: 4 / 3;
   display: grid;
@@ -501,6 +540,58 @@ h2 {
   height: 100%;
   object-fit: contain;
   background: #f7f8f6;
+}
+
+.image-hover-details {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px;
+  color: #ffffff;
+  text-align: left;
+  background: rgba(20, 22, 20, 0.86);
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.design-preview:hover .image-hover-details,
+.design-preview:focus-visible .image-hover-details {
+  opacity: 1;
+}
+
+.image-hover-details > strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.image-hover-specs {
+  display: grid;
+  gap: 6px;
+}
+
+.image-hover-specs > span {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+}
+
+.image-hover-specs small {
+  color: rgba(255, 255, 255, 0.64);
+  font-size: 10px;
+}
+
+.image-hover-specs b {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
 .image-failure {
@@ -541,58 +632,6 @@ h2 {
   color: var(--text-muted);
   text-align: center;
   font-size: 12px;
-}
-
-.preview-dialog {
-  width: min(92vw, 1180px);
-  height: min(90vh, 820px);
-  padding: 48px 24px 62px;
-  background: #1f211f;
-  border: 0;
-  border-radius: 6px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
-}
-
-.preview-dialog::backdrop {
-  background: rgba(15, 16, 15, 0.72);
-  backdrop-filter: blur(5px);
-}
-
-.preview-dialog img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.close-button {
-  position: absolute;
-  top: 12px;
-  right: 14px;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 50%;
-  font-size: 22px;
-  line-height: 1;
-}
-
-.preview-caption {
-  position: absolute;
-  left: 24px;
-  right: 24px;
-  bottom: 18px;
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  color: #ffffff;
-  font-size: 12px;
-}
-
-.preview-caption span {
-  color: #aeb2ae;
 }
 
 @keyframes pulse {

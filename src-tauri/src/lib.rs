@@ -873,12 +873,27 @@ fn value_number(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
     None
 }
 
+fn normalize_https_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let candidate = if raw.starts_with("//") {
+        format!("https:{raw}")
+    } else if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw.to_string()
+    } else if raw.contains('/') && raw.contains('.') {
+        // Lanhu sometimes stores json_url as `host/path` and adds the scheme in WebView.
+        format!("https://{raw}")
+    } else {
+        return None;
+    };
+    Url::parse(&candidate)
+        .ok()
+        .filter(|url| url.scheme() == "https")
+        .map(|_| candidate)
+}
+
 fn nested_url(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    if let Some(url) = value_string(value, keys) {
-        if Url::parse(&url)
-            .map(|value| value.scheme() == "https")
-            .unwrap_or(false)
-        {
+    if let Some(raw) = value_string(value, keys) {
+        if let Some(url) = normalize_https_url(&raw) {
             return Some(url);
         }
     }
@@ -1043,6 +1058,11 @@ fn collect_slices(value: &serde_json::Value) -> Vec<LanhuSlicePayload> {
                     .get("image")
                     .and_then(|item| item.get("bitmap"))
                     .is_some()
+                || object.get("type").and_then(serde_json::Value::as_str) == Some("bitmapLayer")
+                || object
+                    .get("image")
+                    .and_then(|item| item.get("imageUrl"))
+                    .is_some()
                 || object
                     .get("images")
                     .and_then(|item| item.get("png_xxxhd"))
@@ -1081,18 +1101,6 @@ fn collect_slices(value: &serde_json::Value) -> Vec<LanhuSlicePayload> {
     let mut seen = HashSet::new();
     visit(value, &mut output, &mut seen, 0);
     output
-}
-
-fn target_slice(slices: Vec<LanhuSlicePayload>) -> Vec<LanhuSlicePayload> {
-    let target_index = slices.iter().position(|slice| {
-        let name = slice.name.to_ascii_lowercase();
-        name.contains("icon") || name.contains("logo")
-    });
-    if let Some(index) = target_index {
-        slices.into_iter().nth(index).into_iter().collect()
-    } else {
-        slices.into_iter().take(1).collect()
-    }
 }
 
 fn poll_lanhu_capture(
@@ -1206,7 +1214,8 @@ async fn fetch_and_persist_lanhu(
     let response = request_lanhu_json(&client, endpoint).await?;
     let mut project = project_from_response(&response, route, source_url)?;
 
-    if let Some(json_url) = find_json_url(response_data(&response)) {
+    // `project/image` has appeared in both `{data: {result: ...}}` and `{result: ...}` forms.
+    if let Some(json_url) = find_json_url(&response) {
         let json_url = safe_asset_url(&json_url)?;
         emit_progress(
             app,
@@ -1225,7 +1234,7 @@ async fn fetch_and_persist_lanhu(
             lanhu_http_client("")?
         };
         let design_json = request_lanhu_json(&json_client, json_url).await?;
-        project.slices = target_slice(collect_slices(&design_json));
+        project.slices = collect_slices(&design_json);
     }
 
     if project.slices.is_empty() {
@@ -1440,6 +1449,8 @@ async fn download_slice(
     // Lanhu's source URL is the xxxhdpi bitmap. Android xxhdpi is 3/4 of it.
     let width = ((decoded.width() as f64) * 3.0 / 4.0).round().max(1.0) as u32;
     let height = ((decoded.height() as f64) * 3.0 / 4.0).round().max(1.0) as u32;
+    captured.width = Some(width as f64);
+    captured.height = Some(height as f64);
     let resized = decoded.resize_exact(width, height, FilterType::Lanczos3);
     let mut encoded = Cursor::new(Vec::new());
     if let Err(error) = resized.write_to(&mut encoded, ImageFormat::WebP) {
@@ -1702,6 +1713,66 @@ async fn list_saved_captures(app: tauri::AppHandle) -> Result<Vec<CaptureResult>
     Ok(captures)
 }
 
+fn valid_capture_id(capture_id: &str) -> bool {
+    !capture_id.is_empty()
+        && capture_id.len() <= 80
+        && capture_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+#[tauri::command]
+async fn delete_saved_capture(app: tauri::AppHandle, capture_id: String) -> Result<(), String> {
+    if !valid_capture_id(&capture_id) {
+        return Err("无效的抓取记录 ID".to_string());
+    }
+
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法确定应用数据目录：{error}"))?
+        .join("captures");
+    let mut entries = match tokio::fs::read_dir(&root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("抓取记录不存在".to_string())
+        }
+        Err(error) => return Err(format!("无法读取抓取历史：{error}")),
+    };
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("无法读取抓取历史：{error}"))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|error| format!("无法检查抓取记录：{error}"))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let directory = entry.path();
+        let Ok(bytes) = tokio::fs::read(directory.join("capture.json")).await else {
+            continue;
+        };
+        let Ok(capture) = serde_json::from_slice::<CaptureResult>(&bytes) else {
+            continue;
+        };
+        if capture.capture_id != capture_id {
+            continue;
+        }
+
+        tokio::fs::remove_dir_all(directory)
+            .await
+            .map_err(|error| format!("无法删除抓取记录：{error}"))?;
+        return Ok(());
+    }
+
+    Err("抓取记录不存在".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1710,7 +1781,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_lanhu_capture,
             cancel_lanhu_capture,
-            list_saved_captures
+            list_saved_captures,
+            delete_saved_capture
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1776,7 +1848,15 @@ mod tests {
     }
 
     #[test]
-    fn finds_and_selects_an_icon_slice() {
+    fn validates_capture_ids_before_deletion() {
+        assert!(valid_capture_id("1788429897760-1"));
+        assert!(!valid_capture_id("../capture"));
+        assert!(!valid_capture_id("capture/child"));
+        assert!(!valid_capture_id(""));
+    }
+
+    #[test]
+    fn keeps_all_detected_slices() {
         let design_json = serde_json::json!({
             "info": {
                 "layers": [
@@ -1801,9 +1881,42 @@ mod tests {
         });
         let slices = collect_slices(&design_json);
         assert_eq!(slices.len(), 2);
-        let selected = target_slice(slices);
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].name, "icon/inside/tab_rat");
-        assert_eq!(selected[0].url, "https://alipic.lanhuapp.com/icon.png");
+        assert_eq!(slices[0].name, "background");
+        assert_eq!(slices[1].name, "icon/inside/tab_rat");
+        assert_eq!(slices[1].url, "https://alipic.lanhuapp.com/icon.png");
+    }
+
+    #[test]
+    fn normalizes_lanhu_bare_json_url() {
+        let value = serde_json::json!({
+            "version": {"json_url": "alipic.lanhuapp.com/design.json"}
+        });
+        assert_eq!(
+            find_json_url(&value).as_deref(),
+            Some("https://alipic.lanhuapp.com/design.json")
+        );
+    }
+
+    #[test]
+    fn finds_figma_bitmap_layer_slices() {
+        let design_json = serde_json::json!({
+            "artboard": {
+                "layers": [{
+                    "type": "bitmapLayer",
+                    "id": "I1",
+                    "name": "icon/inside/tab-overview-gary",
+                    "image": {
+                        "imageUrl": "https://lanhu-oss-2537-2.lanhuapp.com/FigmaSlicePNG044970105cf846b14bc6ed13f63137b7.png",
+                        "svgUrl": "https://lanhu-oss-2537-2.lanhuapp.com/FigmaSliceSVG6615709efefa7da031590121756a086a.svg"
+                    },
+                    "frame": {"width": 12, "height": 12}
+                }]
+            },
+            "assets": []
+        });
+        let slices = collect_slices(&design_json);
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0].name, "icon/inside/tab-overview-gary");
+        assert_eq!(slices[0].url, "https://lanhu-oss-2537-2.lanhuapp.com/FigmaSlicePNG044970105cf846b14bc6ed13f63137b7.png");
     }
 }

@@ -2,6 +2,7 @@
   "name": "designbridge",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@11.10.0",
   "type": "module",
   "scripts": {
     "start": "./start.sh",
@@ -12,11 +13,16 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "yet-another-react-lightbox": "^3.32.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "vite": "^6.0.3",
-    "typescript": "~5.6.2"
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
   }
 }

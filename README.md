@@ -8,8 +8,8 @@ DesignBridge 是一个用于抓取蓝湖设计稿原图的 Tauri 桌面工具。
 ## 开发
 
 ```bash
-npm install
-npm run tauri dev
+pnpm install
+pnpm tauri dev
 ```
 
 也可以在项目根目录直接运行一键启动脚本：
@@ -17,10 +17,10 @@ npm run tauri dev
 ```bash
 ./start.sh
 # 或
-npm start
+pnpm start
 ```
 
-脚本会自动切换到项目目录，并在依赖缺失时执行 `npm install`。
+脚本会自动切换到项目目录，并在依赖缺失时执行 `pnpm install`。
 
 当前版本支持蓝湖 UI 设计项目的项目名、画板名称、尺寸、更新时间和原始设计图抓取；会从
 设计 JSON 中识别一个目标图标，并在 `mipmap-xxhdpi` 目录输出 WebP（源图按 3/4 缩放）。
