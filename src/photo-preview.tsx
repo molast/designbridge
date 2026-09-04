@@ -6,6 +6,12 @@ import Zoom from "yet-another-react-lightbox/plugins/zoom";
 import "yet-another-react-lightbox/styles.css";
 import "yet-another-react-lightbox/plugins/captions.css";
 
+const checkerboardBackground = {
+  backgroundColor: "#ffffff",
+  backgroundImage: "conic-gradient(#e1e4df 25%, #ffffff 0 50%, #e1e4df 0 75%, #ffffff 0)",
+  backgroundSize: "20px 20px",
+};
+
 export type PreviewItem = {
   key: string;
   src: string;
@@ -55,6 +61,7 @@ function PhotoPreviewHost() {
       carousel={{ finite: request.items.length < 2 }}
       controller={{ closeOnBackdropClick: true }}
       zoom={{ scrollToZoom: false, pinchZoomV4: true }}
+      styles={{ container: checkerboardBackground }}
       labels={{
         Close: "关闭",
         Previous: "上一张",

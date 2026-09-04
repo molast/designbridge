@@ -100,6 +100,18 @@
       </div>
     </div>
 
+    <dialog class="confirm-dialog" id="delete-confirm-dialog" aria-labelledby="delete-confirm-title" tabindex="-1">
+      <div class="confirm-dialog-content">
+        <h2 id="delete-confirm-title">删除抓取记录</h2>
+        <p id="delete-confirm-message"></p>
+        <p class="confirm-dialog-error hidden" id="delete-confirm-error" role="alert"></p>
+        <div class="confirm-dialog-actions">
+          <button class="secondary-button" id="delete-cancel-button" type="button">取消</button>
+          <button class="danger-button" id="delete-confirm-button" type="button">删除</button>
+        </div>
+      </div>
+    </dialog>
+
     <div id="preview-root"></div>
   </body>
 </html>

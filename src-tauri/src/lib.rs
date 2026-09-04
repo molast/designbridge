@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use image::{imageops::FilterType, ImageFormat};
+use image::{imageops::FilterType, DynamicImage, ImageFormat};
 use reqwest::{header, redirect::Policy, Client};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1386,7 +1386,7 @@ async fn download_slice(
     output_dir: &Path,
     index: usize,
     slice: LanhuSlicePayload,
-) -> CapturedSlice {
+) -> Option<CapturedSlice> {
     let density_dir = output_dir.join("mipmap-xxhdpi");
     let mut captured = CapturedSlice {
         id: slice.id,
@@ -1401,41 +1401,37 @@ async fn download_slice(
         error: None,
     };
 
-    if let Err(error) = tokio::fs::create_dir_all(&density_dir).await {
-        captured.error = Some(format!("无法创建 mipmap-xxhdpi 目录：{error}"));
-        return captured;
-    }
     let url = match original_asset_url(&slice.url) {
         Ok(url) => url,
         Err(error) => {
             captured.error = Some(error);
-            return captured;
+            return Some(captured);
         }
     };
     let response = match client.get(url.clone()).send().await {
         Ok(response) => response,
         Err(error) => {
             captured.error = Some(format!("切图下载失败：{error}"));
-            return captured;
+            return Some(captured);
         }
     };
     if !response.status().is_success() {
         captured.error = Some(format!("切图下载失败：HTTP {}", response.status()));
-        return captured;
+        return Some(captured);
     }
     if response.content_length().unwrap_or_default() > MAX_IMAGE_BYTES {
         captured.error = Some("切图超过 100 MB 限制".to_string());
-        return captured;
+        return Some(captured);
     }
     let bytes = match response.bytes().await {
         Ok(bytes) if bytes.len() as u64 <= MAX_IMAGE_BYTES => bytes,
         Ok(_) => {
             captured.error = Some("切图超过 100 MB 限制".to_string());
-            return captured;
+            return Some(captured);
         }
         Err(error) => {
             captured.error = Some(format!("读取切图失败：{error}"));
-            return captured;
+            return Some(captured);
         }
     };
 
@@ -1443,9 +1439,13 @@ async fn download_slice(
         Ok(image) => image,
         Err(error) => {
             captured.error = Some(format!("无法解码切图：{error}"));
-            return captured;
+            return Some(captured);
         }
     };
+    if should_skip_slice(&decoded) {
+        return None;
+    }
+
     // Lanhu's source URL is the xxxhdpi bitmap. Android xxhdpi is 3/4 of it.
     let width = ((decoded.width() as f64) * 3.0 / 4.0).round().max(1.0) as u32;
     let height = ((decoded.height() as f64) * 3.0 / 4.0).round().max(1.0) as u32;
@@ -1455,7 +1455,12 @@ async fn download_slice(
     let mut encoded = Cursor::new(Vec::new());
     if let Err(error) = resized.write_to(&mut encoded, ImageFormat::WebP) {
         captured.error = Some(format!("无法编码 WebP：{error}"));
-        return captured;
+        return Some(captured);
+    }
+
+    if let Err(error) = tokio::fs::create_dir_all(&density_dir).await {
+        captured.error = Some(format!("无法创建 mipmap-xxhdpi 目录：{error}"));
+        return Some(captured);
     }
 
     let file_name = format!(
@@ -1468,7 +1473,15 @@ async fn download_slice(
         Ok(()) => captured.local_path = Some(file_path.to_string_lossy().into_owned()),
         Err(error) => captured.error = Some(format!("写入切图失败：{error}")),
     }
-    captured
+    Some(captured)
+}
+
+fn should_skip_slice(image: &DynamicImage) -> bool {
+    if image.width() == 1 && image.height() == 1 {
+        return true;
+    }
+
+    image.to_rgba8().pixels().all(|pixel| pixel[3] == 0)
 }
 
 async fn persist_project(
@@ -1537,8 +1550,9 @@ async fn persist_project(
     let slices_total = project.slices.len();
     let mut slices = Vec::with_capacity(slices_total);
     for (index, slice) in project.slices.into_iter().enumerate() {
-        let captured = download_slice(&client, &output_dir, index, slice).await;
-        slices.push(captured);
+        if let Some(captured) = download_slice(&client, &output_dir, index, slice).await {
+            slices.push(captured);
+        }
         emit_progress(
             app,
             capture_id,
@@ -1791,6 +1805,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{Rgba, RgbaImage};
 
     #[test]
     fn accepts_lanhu_project_and_invite_urls() {
@@ -1884,6 +1899,20 @@ mod tests {
         assert_eq!(slices[0].name, "background");
         assert_eq!(slices[1].name, "icon/inside/tab_rat");
         assert_eq!(slices[1].url, "https://alipic.lanhuapp.com/icon.png");
+    }
+
+    #[test]
+    fn skips_one_pixel_and_fully_transparent_slices() {
+        let one_pixel = DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
+        assert!(should_skip_slice(&one_pixel));
+
+        let transparent =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(20, 12, Rgba([255, 255, 255, 0])));
+        assert!(should_skip_slice(&transparent));
+
+        let visible =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(20, 12, Rgba([255, 255, 255, 255])));
+        assert!(!should_skip_slice(&visible));
     }
 
     #[test]

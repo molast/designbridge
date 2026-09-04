@@ -73,12 +73,18 @@ const historyList = document.querySelector<HTMLElement>("#history-list")!;
 const resultMeta = document.querySelector<HTMLElement>("#result-meta")!;
 const emptyState = document.querySelector<HTMLElement>("#empty-state")!;
 const designGrid = document.querySelector<HTMLElement>("#design-grid")!;
+const deleteConfirmDialog = document.querySelector<HTMLDialogElement>("#delete-confirm-dialog")!;
+const deleteConfirmMessage = document.querySelector<HTMLElement>("#delete-confirm-message")!;
+const deleteConfirmError = document.querySelector<HTMLElement>("#delete-confirm-error")!;
+const deleteCancelButton = document.querySelector<HTMLButtonElement>("#delete-cancel-button")!;
+const deleteConfirmButton = document.querySelector<HTMLButtonElement>("#delete-confirm-button")!;
 const previewRoot = document.querySelector<HTMLElement>("#preview-root")!;
 mountPhotoPreview(previewRoot);
 
 let activeCaptureId: string | null = null;
 let selectedCapture: CaptureResult | null = null;
 let history: CaptureResult[] = [];
+let pendingDeleteCaptureId: string | null = null;
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => {
@@ -345,6 +351,56 @@ function renderCapture(capture: CaptureResult) {
   syncRenderedImageSizes(capture);
 }
 
+function closeDeleteDialog() {
+  pendingDeleteCaptureId = null;
+  deleteConfirmButton.disabled = false;
+  deleteConfirmButton.textContent = "删除";
+  deleteConfirmError.textContent = "";
+  deleteConfirmError.classList.add("hidden");
+  if (deleteConfirmDialog.open) deleteConfirmDialog.close();
+}
+
+function requestCaptureDeletion(capture: CaptureResult) {
+  pendingDeleteCaptureId = capture.captureId;
+  deleteConfirmMessage.textContent = `确定删除“${capture.projectName}”及其本地图片吗？`;
+  deleteConfirmError.textContent = "";
+  deleteConfirmError.classList.add("hidden");
+  deleteConfirmDialog.showModal();
+  deleteConfirmDialog.focus({ preventScroll: true });
+}
+
+async function confirmCaptureDeletion() {
+  const capture = history.find((item) => item.captureId === pendingDeleteCaptureId);
+  if (!capture) {
+    closeDeleteDialog();
+    return;
+  }
+
+  deleteConfirmButton.disabled = true;
+  deleteCancelButton.disabled = true;
+  deleteConfirmButton.textContent = "删除中…";
+  try {
+    await invoke("delete_saved_capture", { captureId: capture.captureId });
+    const deletedSelected = selectedCapture?.captureId === capture.captureId;
+    history = history.filter((item) => item.captureId !== capture.captureId);
+    closeDeleteDialog();
+    if (deletedSelected) {
+      if (history[0]) renderCapture(history[0]);
+      else renderEmptyCapture();
+    } else {
+      renderHistory();
+    }
+    setStatus("记录已删除", "success");
+  } catch (error) {
+    deleteConfirmButton.disabled = false;
+    deleteConfirmButton.textContent = "重新删除";
+    deleteConfirmError.textContent = `删除失败：${String(error)}`;
+    deleteConfirmError.classList.remove("hidden");
+  } finally {
+    deleteCancelButton.disabled = false;
+  }
+}
+
 async function startCapture() {
   clearError();
   let parsed: URL;
@@ -401,29 +457,12 @@ openFolderButton.addEventListener("click", async () => {
   }
 });
 
-historyList.addEventListener("click", async (event) => {
+historyList.addEventListener("click", (event) => {
   const deleteTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-delete-capture-id]");
   if (deleteTarget) {
     const captureId = deleteTarget.dataset.deleteCaptureId;
     const capture = history.find((item) => item.captureId === captureId);
-    if (!capture || !window.confirm(`确定删除“${capture.projectName}”及其本地图片吗？`)) return;
-
-    deleteTarget.disabled = true;
-    try {
-      await invoke("delete_saved_capture", { captureId: capture.captureId });
-      const deletedSelected = selectedCapture?.captureId === capture.captureId;
-      history = history.filter((item) => item.captureId !== capture.captureId);
-      if (deletedSelected) {
-        if (history[0]) renderCapture(history[0]);
-        else renderEmptyCapture();
-      } else {
-        renderHistory();
-      }
-      setStatus("记录已删除", "success");
-    } catch (error) {
-      deleteTarget.disabled = false;
-      showError(`删除失败：${String(error)}`);
-    }
+    if (capture) requestCaptureDeletion(capture);
     return;
   }
 
@@ -431,6 +470,13 @@ historyList.addEventListener("click", async (event) => {
   if (!target) return;
   const capture = history.find((item) => item.captureId === target.dataset.captureId);
   if (capture) renderCapture(capture);
+});
+
+deleteCancelButton.addEventListener("click", closeDeleteDialog);
+deleteConfirmButton.addEventListener("click", () => void confirmCaptureDeletion());
+deleteConfirmDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  if (!deleteConfirmButton.disabled) closeDeleteDialog();
 });
 
 designGrid.addEventListener("click", (event) => {
