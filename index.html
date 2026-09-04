@@ -18,75 +18,66 @@
             <span>蓝湖资源抓取</span>
           </div>
         </div>
-        <div class="app-status" id="app-status">
-          <span class="status-dot"></span>
-          <span>就绪</span>
+
+        <form class="topbar-capture" id="capture-form" aria-label="抓取蓝湖设计稿">
+          <label class="sr-only" for="lanhu-url">蓝湖链接</label>
+          <div class="url-row">
+            <input
+              id="lanhu-url"
+              name="lanhu-url"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="粘贴蓝湖设计稿链接"
+              required
+            />
+            <button class="primary-button" id="capture-button" type="submit">开始抓取</button>
+            <button class="secondary-button hidden" id="cancel-button" type="button">取消</button>
+          </div>
+          <p class="field-error hidden" id="field-error" role="alert"></p>
+        </form>
+
+        <div class="topbar-actions">
+          <div class="progress-panel hidden" id="progress-panel" aria-live="polite">
+            <div class="progress-copy">
+              <span id="progress-message">正在连接蓝湖…</span>
+              <span id="progress-value">0%</span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-bar" id="progress-bar"></div>
+            </div>
+          </div>
+          <div class="app-status" id="app-status">
+            <span class="status-dot"></span>
+            <span>就绪</span>
+          </div>
         </div>
       </header>
 
       <div class="workspace">
-        <aside class="sidebar">
-          <div class="sidebar-heading">
-            <span>抓取记录</span>
-            <span class="history-count" id="history-count">0</span>
+        <aside class="sidebar" id="sidebar" aria-label="抓取记录">
+          <div class="sidebar-surface" id="sidebar-surface">
+            <div class="sidebar-heading">
+              <span>抓取记录</span>
+              <span class="history-count" id="history-count">0</span>
+            </div>
+            <div class="history-list" id="history-list"></div>
+            <div
+              class="sidebar-resize-handle"
+              id="sidebar-resize-handle"
+              role="separator"
+              aria-label="调整抓取记录栏宽度"
+              aria-orientation="vertical"
+              tabindex="0"
+            ></div>
           </div>
-          <div class="history-list" id="history-list"></div>
+          <div class="sidebar-toggle-root" id="sidebar-toggle-root"></div>
         </aside>
 
         <main class="main-content">
-          <section class="capture-tool" aria-labelledby="capture-title">
-            <div class="section-heading">
-              <div>
-                <p class="eyebrow">IMPORT</p>
-                <h1 id="capture-title">抓取蓝湖设计稿</h1>
-              </div>
-              <button class="secondary-button hidden" id="open-folder-button" type="button">
-                打开本地目录
-              </button>
-            </div>
-
-            <form class="capture-form" id="capture-form">
-              <label for="lanhu-url">蓝湖链接</label>
-              <div class="url-row">
-                <input
-                  id="lanhu-url"
-                  name="lanhu-url"
-                  type="url"
-                  inputmode="url"
-                  autocomplete="off"
-                  spellcheck="false"
-                  placeholder="https://lanhuapp.com/link/#/invite?sid=..."
-                  required
-                />
-                <button class="primary-button" id="capture-button" type="submit">
-                  开始抓取
-                </button>
-                <button class="secondary-button hidden" id="cancel-button" type="button">
-                  取消
-                </button>
-              </div>
-              <p class="field-error hidden" id="field-error" role="alert"></p>
-            </form>
-
-            <div class="progress-panel hidden" id="progress-panel" aria-live="polite">
-              <div class="progress-copy">
-                <span id="progress-message">正在连接蓝湖…</span>
-                <span id="progress-value">0%</span>
-              </div>
-              <div class="progress-track">
-                <div class="progress-bar" id="progress-bar"></div>
-              </div>
-            </div>
-          </section>
-
           <section class="results-section" aria-labelledby="results-title">
-            <div class="results-header">
-              <div>
-                <p class="eyebrow">CAPTURE</p>
-                <h2 id="results-title">设计稿</h2>
-              </div>
-              <div class="result-meta" id="result-meta"></div>
-            </div>
+            <h1 class="sr-only" id="results-title">设计稿</h1>
             <div class="empty-state" id="empty-state">
               <div class="empty-grid" aria-hidden="true">
                 <span></span><span></span><span></span><span></span>
@@ -94,7 +85,40 @@
               <strong>暂无抓取结果</strong>
               <span>抓取完成的画板会显示在这里</span>
             </div>
-            <div class="design-grid hidden" id="design-grid"></div>
+            <div class="design-inspector hidden" id="design-inspector">
+              <section class="inspector-canvas" aria-label="设计稿画布">
+                <header class="canvas-toolbar">
+                  <div class="canvas-context">
+                    <strong id="canvas-title">设计稿</strong>
+                    <div class="result-meta" id="result-meta"></div>
+                  </div>
+                  <div class="canvas-actions">
+                    <div class="canvas-zoom" aria-label="画布缩放">
+                      <button id="zoom-out-button" type="button" aria-label="缩小画布" title="缩小">−</button>
+                      <label>
+                        <input id="zoom-input" type="number" min="4" max="400" step="1" value="100" aria-label="画布缩放百分比" />
+                        <span>%</span>
+                      </label>
+                      <button id="zoom-in-button" type="button" aria-label="放大画布" title="放大">+</button>
+                    </div>
+                  </div>
+                </header>
+                <div class="artboard-scroll" id="artboard-scroll">
+                  <div class="artboard-wrap" id="artboard-wrap">
+                    <img id="artboard-image" alt="" draggable="false" />
+                    <div class="slice-outlines" id="slice-outlines" aria-hidden="true"></div>
+                    <div class="layer-highlight hidden" id="layer-highlight" aria-hidden="true">
+                      <span id="layer-highlight-size"></span>
+                    </div>
+                  </div>
+                </div>
+              </section>
+              <aside class="inspector-details hidden" id="inspector-details" aria-label="图层详情">
+                <div id="platform-picker-root"></div>
+                <div class="layer-details" id="layer-details"></div>
+                <div id="slice-export-root"></div>
+              </aside>
+            </div>
           </section>
         </main>
       </div>

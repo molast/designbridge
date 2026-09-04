@@ -23,11 +23,13 @@ static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[derive(Default)]
 struct CaptureRuntime {
     inner: Mutex<CaptureRuntimeInner>,
+    file_ops: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
 struct CaptureRuntimeInner {
     active: HashSet<String>,
+    cancelled: HashSet<String>,
     sources: HashMap<String, String>,
     chunks: HashMap<String, ChunkAccumulator>,
 }
@@ -47,6 +49,8 @@ struct LanhuProjectPayload {
     designs: Vec<LanhuDesignPayload>,
     #[serde(default)]
     slices: Vec<LanhuSlicePayload>,
+    #[serde(default)]
+    layers: Vec<InspectableLayer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -56,9 +60,20 @@ struct LanhuDesignPayload {
     name: String,
     width: Option<f64>,
     height: Option<f64>,
+    #[serde(default)]
+    coordinate_space: Option<DesignCoordinateSpace>,
     url: String,
     update_time: Option<String>,
     has_comment: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct DesignCoordinateSpace {
+    platform: String,
+    width: f64,
+    height: f64,
+    unit: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,6 +113,8 @@ struct CapturedDesign {
     name: String,
     width: Option<f64>,
     height: Option<f64>,
+    #[serde(default)]
+    coordinate_space: Option<DesignCoordinateSpace>,
     update_time: Option<String>,
     has_comment: bool,
     remote_url: String,
@@ -120,6 +137,135 @@ struct CapturedSlice {
     error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportSliceRequest {
+    capture_id: String,
+    layer_id: String,
+    slice_id: String,
+    format: String,
+    platform: String,
+    scales: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportedSliceFile {
+    label: String,
+    path: String,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportSliceResult {
+    output_dir: String,
+    files: Vec<ExportedSliceFile>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ExportTarget {
+    label: &'static str,
+    directory: &'static str,
+    suffix: &'static str,
+    factor: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LayerFrame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LayerRadius {
+    top_left: f64,
+    top_right: f64,
+    bottom_right: f64,
+    bottom_left: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LayerPaint {
+    paint_type: String,
+    color: Option<String>,
+    token: Option<String>,
+    opacity: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LayerBorder {
+    width: f64,
+    style: String,
+    color: Option<String>,
+    token: Option<String>,
+    opacity: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LayerShadow {
+    shadow_type: String,
+    color: Option<String>,
+    offset_x: f64,
+    offset_y: f64,
+    blur: f64,
+    spread: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LayerBlur {
+    blur_type: String,
+    radius: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LayerText {
+    content: String,
+    font_family: Option<String>,
+    font_size: Option<f64>,
+    font_weight: Option<f64>,
+    alignment: Option<String>,
+    line_height: Option<f64>,
+    letter_spacing: Option<f64>,
+    color: Option<String>,
+    token: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct InspectableLayer {
+    id: String,
+    parent_id: Option<String>,
+    name: String,
+    layer_type: String,
+    depth: usize,
+    order: usize,
+    frame: Option<LayerFrame>,
+    #[serde(default)]
+    frame_is_visual: bool,
+    opacity: f64,
+    rotation: f64,
+    visible: bool,
+    radius: LayerRadius,
+    fills: Vec<LayerPaint>,
+    borders: Vec<LayerBorder>,
+    shadows: Vec<LayerShadow>,
+    blurs: Vec<LayerBlur>,
+    text: Option<LayerText>,
+    is_asset: bool,
+    has_slice: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CaptureResult {
@@ -140,6 +286,16 @@ struct CaptureResult {
     slice_downloaded_count: usize,
     #[serde(default)]
     slice_failed_count: usize,
+    #[serde(default)]
+    slice_total_count: usize,
+    #[serde(default = "default_true")]
+    slices_complete: bool,
+    #[serde(default)]
+    layers: Vec<InspectableLayer>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 struct TitleMessage<'a> {
@@ -588,6 +744,20 @@ fn take_source(runtime: &CaptureRuntime, capture_id: &str) -> Option<String> {
     inner.sources.remove(capture_id)
 }
 
+fn capture_cancelled(runtime: &CaptureRuntime, capture_id: &str) -> bool {
+    runtime
+        .inner
+        .lock()
+        .map(|inner| inner.cancelled.contains(capture_id))
+        .unwrap_or(true)
+}
+
+fn mark_capture_cancelled(runtime: &CaptureRuntime, capture_id: &str) {
+    if let Ok(mut inner) = runtime.inner.lock() {
+        inner.cancelled.insert(capture_id.to_string());
+    }
+}
+
 fn handle_message(
     app: tauri::AppHandle,
     window: WebviewWindow,
@@ -873,6 +1043,21 @@ fn value_number(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
     None
 }
 
+fn finite_number(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    let object = value.as_object()?;
+    for key in keys {
+        let number = object.get(*key).and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|value| value.parse::<f64>().ok()))
+        });
+        if let Some(number) = number.filter(|number| number.is_finite()) {
+            return Some(number);
+        }
+    }
+    None
+}
+
 fn normalize_https_url(raw: &str) -> Option<String> {
     let raw = raw.trim();
     let candidate = if raw.starts_with("//") {
@@ -942,6 +1127,7 @@ fn design_from_value(value: &serde_json::Value, fallback_id: &str) -> Option<Lan
         name: value_string(value, &["name", "title"]).unwrap_or_else(|| "未命名画板".to_string()),
         width: value_number(value, &["width", "w"]),
         height: value_number(value, &["height", "h"]),
+        coordinate_space: None,
         url,
         update_time: value_string(value, &["update_time", "updateTime"]),
         has_comment: value
@@ -949,6 +1135,342 @@ fn design_from_value(value: &serde_json::Value, fallback_id: &str) -> Option<Lan
             .or_else(|| value.get("hasComment"))
             .and_then(serde_json::Value::as_bool),
     })
+}
+
+fn android_coordinate_space(value: &serde_json::Value) -> Option<DesignCoordinateSpace> {
+    let artboard = value.get("artboard")?;
+    let frame = artboard
+        .get("frame")
+        .or_else(|| artboard.get("realFrame"))?;
+    let width = value_number(frame, &["width", "w"])?;
+    let height = value_number(frame, &["height", "h"])?;
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+
+    Some(DesignCoordinateSpace {
+        platform: "android".to_string(),
+        width,
+        height,
+        unit: "dp".to_string(),
+    })
+}
+
+fn layer_frame(value: &serde_json::Value) -> Option<LayerFrame> {
+    let frame = value.get("realFrame").or_else(|| value.get("frame"))?;
+    let width = finite_number(frame, &["width", "w"])?;
+    let height = finite_number(frame, &["height", "h"])?;
+    if width < 0.0 || height < 0.0 {
+        return None;
+    }
+    Some(LayerFrame {
+        x: finite_number(frame, &["left", "x"]).unwrap_or(0.0),
+        y: finite_number(frame, &["top", "y"]).unwrap_or(0.0),
+        width,
+        height,
+    })
+}
+
+fn radius_value(value: &serde_json::Value) -> Option<LayerRadius> {
+    Some(LayerRadius {
+        top_left: finite_number(value, &["topLeft", "top_left"]).unwrap_or(0.0),
+        top_right: finite_number(value, &["topRight", "top_right"]).unwrap_or(0.0),
+        bottom_right: finite_number(value, &["bottomRight", "bottom_right"]).unwrap_or(0.0),
+        bottom_left: finite_number(value, &["bottomLeft", "bottom_left"]).unwrap_or(0.0),
+    })
+}
+
+fn layer_radius(value: &serde_json::Value) -> LayerRadius {
+    let path_radius = value
+        .get("paths")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|paths| {
+            paths.iter().find_map(|path| {
+                let radius = path.get("radius").and_then(radius_value)?;
+                let has_radius = radius.top_left != 0.0
+                    || radius.top_right != 0.0
+                    || radius.bottom_right != 0.0
+                    || radius.bottom_left != 0.0;
+                has_radius.then_some(radius)
+            })
+        });
+    path_radius
+        .or_else(|| value.get("radius").and_then(radius_value))
+        .unwrap_or_default()
+}
+
+fn color_value(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("color")
+        .and_then(|color| value_string(color, &["value", "hex"]))
+        .or_else(|| value_string(value, &["value", "hex"]))
+}
+
+fn color_token(value: &serde_json::Value) -> Option<String> {
+    value
+        .pointer("/boundVariables/color/name")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/color/boundVariables/color/name")
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_string)
+}
+
+fn layer_paints(value: &serde_json::Value) -> Vec<LayerPaint> {
+    value
+        .pointer("/style/fills")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|fill| {
+            fill.get("isEnabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .map(|fill| LayerPaint {
+            paint_type: value_string(fill, &["type"]).unwrap_or_else(|| "color".to_string()),
+            color: color_value(fill),
+            token: color_token(fill),
+            opacity: finite_number(fill, &["opacity"]).unwrap_or(1.0),
+        })
+        .collect()
+}
+
+fn layer_borders(value: &serde_json::Value) -> Vec<LayerBorder> {
+    value
+        .pointer("/style/borders")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|border| {
+            border
+                .get("isEnabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .map(|border| LayerBorder {
+            width: finite_number(border, &["width"]).unwrap_or(0.0),
+            style: value_string(border, &["style"]).unwrap_or_else(|| "solid".to_string()),
+            color: color_value(border),
+            token: color_token(border),
+            opacity: finite_number(border, &["opacity"]).unwrap_or(1.0),
+        })
+        .collect()
+}
+
+fn layer_shadows(value: &serde_json::Value) -> Vec<LayerShadow> {
+    value
+        .pointer("/style/shadows")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|shadow| {
+            shadow
+                .get("isEnabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .map(|shadow| {
+            let offset = shadow.get("offset").unwrap_or(shadow);
+            LayerShadow {
+                shadow_type: value_string(shadow, &["type"])
+                    .unwrap_or_else(|| "dropShadow".to_string()),
+                color: color_value(shadow),
+                offset_x: finite_number(offset, &["x", "left"]).unwrap_or(0.0),
+                offset_y: finite_number(offset, &["y", "top"]).unwrap_or(0.0),
+                blur: finite_number(shadow, &["blur", "radius"]).unwrap_or(0.0),
+                spread: finite_number(shadow, &["spread"]).unwrap_or(0.0),
+            }
+        })
+        .collect()
+}
+
+fn layer_blurs(value: &serde_json::Value) -> Vec<LayerBlur> {
+    value
+        .pointer("/style/blurs")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|blur| {
+            blur.get("isEnabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .map(|blur| LayerBlur {
+            blur_type: value_string(blur, &["type"]).unwrap_or_else(|| "layerBlur".to_string()),
+            radius: finite_number(blur, &["radius", "blur"]).unwrap_or(0.0),
+        })
+        .collect()
+}
+
+fn layer_text(value: &serde_json::Value) -> Option<LayerText> {
+    let text = value.get("text")?;
+    let style = text.get("style").unwrap_or(text);
+    let font = style.get("font").unwrap_or(style);
+    let content =
+        value_string(text, &["value", "content"]).or_else(|| value_string(style, &["content"]))?;
+    let color = style.get("color").unwrap_or(style);
+    Some(LayerText {
+        content,
+        font_family: value_string(font, &["name", "fontFamily", "postScriptName"]),
+        font_size: finite_number(font, &["size", "fontSize"]),
+        font_weight: finite_number(font, &["fontWeight", "weight"]),
+        alignment: value_string(font, &["align", "textAlign"]),
+        line_height: font
+            .get("lineHeight")
+            .and_then(|line_height| finite_number(line_height, &["value"]))
+            .or_else(|| finite_number(font, &["lineHeight"])),
+        letter_spacing: font
+            .get("letterSpacing")
+            .and_then(|spacing| finite_number(spacing, &["value"]))
+            .or_else(|| finite_number(font, &["letterSpacing"])),
+        color: value_string(color, &["value", "hex"]),
+        token: color_token(color),
+    })
+}
+
+fn collect_layers(value: &serde_json::Value) -> Vec<InspectableLayer> {
+    fn visit(
+        value: &serde_json::Value,
+        parent_id: Option<&str>,
+        depth: usize,
+        is_root: bool,
+        order: &mut usize,
+        output: &mut Vec<InspectableLayer>,
+    ) {
+        if depth > 64 || output.len() >= 20_000 {
+            return;
+        }
+
+        let id = value_string(value, &["id", "web_id", "webId"]);
+        if let Some(id) = id.as_deref() {
+            let mut frame = layer_frame(value);
+            if is_root {
+                if let Some(frame) = frame.as_mut() {
+                    frame.x = 0.0;
+                    frame.y = 0.0;
+                }
+            }
+            output.push(InspectableLayer {
+                id: id.to_string(),
+                parent_id: parent_id.map(str::to_string),
+                name: value_string(value, &["name", "title"])
+                    .unwrap_or_else(|| "未命名图层".to_string()),
+                layer_type: value_string(value, &["type"]).unwrap_or_else(|| "layer".to_string()),
+                depth,
+                order: *order,
+                frame,
+                frame_is_visual: value.get("realFrame").is_some(),
+                opacity: finite_number(value, &["opacity"]).unwrap_or(1.0),
+                rotation: finite_number(value, &["rotation"]).unwrap_or(0.0),
+                visible: value
+                    .get("visible")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true),
+                radius: layer_radius(value),
+                fills: layer_paints(value),
+                borders: layer_borders(value),
+                shadows: layer_shadows(value),
+                blurs: layer_blurs(value),
+                text: layer_text(value),
+                is_asset: value
+                    .get("isAsset")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                    || value
+                        .get("hasExportImage")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                    || value.get("type").and_then(serde_json::Value::as_str) == Some("bitmapLayer"),
+                has_slice: false,
+            });
+            *order += 1;
+        }
+
+        if let Some(children) = value.get("layers").and_then(serde_json::Value::as_array) {
+            for child in children {
+                visit(
+                    child,
+                    id.as_deref().or(parent_id),
+                    depth + usize::from(id.is_some()),
+                    false,
+                    order,
+                    output,
+                );
+            }
+        }
+    }
+
+    let Some(artboard) = value.get("artboard") else {
+        return Vec::new();
+    };
+    let mut output = Vec::new();
+    let mut order = 0;
+    visit(artboard, None, 0, true, &mut order, &mut output);
+    output
+}
+
+fn link_slices_to_layers(layers: &mut [InspectableLayer], slices: &[LanhuSlicePayload]) {
+    let slice_ids = slices
+        .iter()
+        .map(|slice| slice.id.as_str())
+        .collect::<HashSet<_>>();
+    for layer in layers {
+        layer.has_slice = slice_ids.contains(layer.id.as_str());
+        layer.is_asset |= layer.has_slice;
+    }
+}
+
+fn normalize_legacy_layer_frames(layers: &mut [InspectableLayer]) {
+    for layer in layers {
+        if layer.frame_is_visual {
+            continue;
+        }
+        layer.frame_is_visual = true;
+
+        let Some(frame) = layer.frame.as_mut() else {
+            continue;
+        };
+        let rotation = layer.rotation.rem_euclid(360.0);
+        if rotation.abs() < 0.0001 || (rotation - 360.0).abs() < 0.0001 {
+            continue;
+        }
+
+        // Figma represents a horizontal flip as a 180-degree rotation while Lanhu's
+        // visual frame only moves to the opposite horizontal edge.
+        if (rotation - 180.0).abs() < 0.0001 {
+            frame.x -= frame.width;
+            continue;
+        }
+
+        let radians = rotation.to_radians();
+        let cosine = radians.cos();
+        let sine = radians.sin();
+        let corners = [
+            (0.0, 0.0),
+            (frame.width, 0.0),
+            (0.0, frame.height),
+            (frame.width, frame.height),
+        ];
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for (x, y) in corners {
+            let rotated_x = x * cosine + y * sine;
+            let rotated_y = -x * sine + y * cosine;
+            min_x = min_x.min(rotated_x);
+            min_y = min_y.min(rotated_y);
+            max_x = max_x.max(rotated_x);
+            max_y = max_y.max(rotated_y);
+        }
+        frame.x += min_x;
+        frame.y += min_y;
+        frame.width = max_x - min_x;
+        frame.height = max_y - min_y;
+    }
 }
 
 fn find_array<'a>(
@@ -1006,6 +1528,7 @@ fn project_from_response(
             .unwrap_or_else(|| "未命名项目".to_string()),
         designs,
         slices: Vec::new(),
+        layers: Vec::new(),
     })
 }
 
@@ -1234,7 +1757,15 @@ async fn fetch_and_persist_lanhu(
             lanhu_http_client("")?
         };
         let design_json = request_lanhu_json(&json_client, json_url).await?;
+        if let (Some(design), Some(coordinate_space)) = (
+            project.designs.first_mut(),
+            android_coordinate_space(&design_json),
+        ) {
+            design.coordinate_space = Some(coordinate_space);
+        }
         project.slices = collect_slices(&design_json);
+        project.layers = collect_layers(&design_json);
+        link_slices_to_layers(&mut project.layers, &project.slices);
     }
 
     if project.slices.is_empty() {
@@ -1250,7 +1781,11 @@ async fn fetch_and_persist_lanhu(
             app,
             capture_id,
             "parse",
-            &format!("已识别 {} 个目标切图，开始导出…", project.slices.len()),
+            &format!(
+                "已读取 {} 个图层和 {} 个目标切图，正在保存画板…",
+                project.layers.len(),
+                project.slices.len()
+            ),
             34,
         );
     }
@@ -1322,6 +1857,7 @@ async fn download_design(
         name: design.name,
         width: design.width,
         height: design.height,
+        coordinate_space: design.coordinate_space,
         update_time: design.update_time,
         has_comment: design.has_comment.unwrap_or(false),
         remote_url: design.url.clone(),
@@ -1382,6 +1918,8 @@ async fn download_design(
 }
 
 async fn download_slice(
+    app: &tauri::AppHandle,
+    capture_id: &str,
     client: &Client,
     output_dir: &Path,
     index: usize,
@@ -1458,6 +1996,11 @@ async fn download_slice(
         return Some(captured);
     }
 
+    let runtime = app.state::<CaptureRuntime>();
+    let _file_guard = runtime.file_ops.lock().await;
+    if capture_cancelled(&runtime, capture_id) {
+        return None;
+    }
     if let Err(error) = tokio::fs::create_dir_all(&density_dir).await {
         captured.error = Some(format!("无法创建 mipmap-xxhdpi 目录：{error}"));
         return Some(captured);
@@ -1484,22 +2027,181 @@ fn should_skip_slice(image: &DynamicImage) -> bool {
     image.to_rgba8().pixels().all(|pixel| pixel[3] == 0)
 }
 
+fn export_target(platform: &str, scale: &str) -> Option<ExportTarget> {
+    match (platform, scale) {
+        ("android", "mdpi") => Some(ExportTarget {
+            label: "mipmap-mdpi",
+            directory: "mipmap-mdpi",
+            suffix: "",
+            factor: 1.0,
+        }),
+        ("android", "hdpi") => Some(ExportTarget {
+            label: "mipmap-hdpi",
+            directory: "mipmap-hdpi",
+            suffix: "",
+            factor: 1.5,
+        }),
+        ("android", "xhdpi") => Some(ExportTarget {
+            label: "mipmap-xhdpi",
+            directory: "mipmap-xhdpi",
+            suffix: "",
+            factor: 2.0,
+        }),
+        ("android", "xxhdpi") => Some(ExportTarget {
+            label: "mipmap-xxhdpi",
+            directory: "mipmap-xxhdpi",
+            suffix: "",
+            factor: 3.0,
+        }),
+        ("android", "xxxhdpi") => Some(ExportTarget {
+            label: "mipmap-xxxhdpi",
+            directory: "mipmap-xxxhdpi",
+            suffix: "",
+            factor: 4.0,
+        }),
+        ("ios", "1x") => Some(ExportTarget {
+            label: "@1x",
+            directory: "",
+            suffix: "",
+            factor: 1.0,
+        }),
+        ("ios", "2x") => Some(ExportTarget {
+            label: "@2x",
+            directory: "",
+            suffix: "@2x",
+            factor: 2.0,
+        }),
+        ("ios", "3x") => Some(ExportTarget {
+            label: "@3x",
+            directory: "",
+            suffix: "@3x",
+            factor: 3.0,
+        }),
+        _ => None,
+    }
+}
+
+fn export_dimension(logical: f64, factor: f64) -> Result<u32, String> {
+    let pixels = (logical * factor).round();
+    if !pixels.is_finite() || !(1.0..=16_384.0).contains(&pixels) {
+        return Err("切图目标尺寸无效".to_string());
+    }
+    Ok(pixels as u32)
+}
+
+fn encode_export_image(image: &DynamicImage, format: &str) -> Result<Vec<u8>, String> {
+    let encoded_image = if format == "jpg" {
+        let rgba = image.to_rgba8();
+        let rgb = image::RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+            let pixel = rgba.get_pixel(x, y);
+            let alpha = u16::from(pixel[3]);
+            image::Rgb([
+                ((u16::from(pixel[0]) * alpha + 255 * (255 - alpha) + 127) / 255) as u8,
+                ((u16::from(pixel[1]) * alpha + 255 * (255 - alpha) + 127) / 255) as u8,
+                ((u16::from(pixel[2]) * alpha + 255 * (255 - alpha) + 127) / 255) as u8,
+            ])
+        });
+        DynamicImage::ImageRgb8(rgb)
+    } else {
+        image.clone()
+    };
+    let image_format = match format {
+        "png" => ImageFormat::Png,
+        "jpg" => ImageFormat::Jpeg,
+        "webp" => ImageFormat::WebP,
+        _ => return Err("仅支持 PNG、JPG 和 WEBP 格式".to_string()),
+    };
+    let mut encoded = Cursor::new(Vec::new());
+    encoded_image
+        .write_to(&mut encoded, image_format)
+        .map_err(|error| format!("无法编码切图：{error}"))?;
+    Ok(encoded.into_inner())
+}
+
+async fn write_capture_metadata(
+    app: &tauri::AppHandle,
+    capture_id: &str,
+    output_dir: &Path,
+    result: &CaptureResult,
+) -> Result<bool, String> {
+    let runtime = app.state::<CaptureRuntime>();
+    let _file_guard = runtime.file_ops.lock().await;
+    if capture_cancelled(&runtime, capture_id) {
+        return Ok(false);
+    }
+    if !tokio::fs::try_exists(output_dir)
+        .await
+        .map_err(|error| format!("无法检查抓取目录：{error}"))?
+    {
+        return Ok(false);
+    }
+
+    let metadata = serde_json::to_vec_pretty(result)
+        .map_err(|error| format!("无法生成项目元数据：{error}"))?;
+    tokio::fs::write(output_dir.join("capture.json"), metadata)
+        .await
+        .map_err(|error| format!("无法保存项目元数据：{error}"))?;
+    Ok(true)
+}
+
+async fn download_slices_in_background(
+    app: tauri::AppHandle,
+    client: Client,
+    output_dir: PathBuf,
+    mut result: CaptureResult,
+    pending_slices: Vec<LanhuSlicePayload>,
+) {
+    let total = pending_slices.len();
+    let mut slices = Vec::with_capacity(total);
+    for (index, slice) in pending_slices.into_iter().enumerate() {
+        if capture_cancelled(&app.state::<CaptureRuntime>(), &result.capture_id) {
+            return;
+        }
+        if let Some(captured) =
+            download_slice(&app, &result.capture_id, &client, &output_dir, index, slice).await
+        {
+            slices.push(captured);
+        }
+    }
+
+    result.slice_downloaded_count = slices
+        .iter()
+        .filter(|slice| slice.local_path.is_some())
+        .count();
+    result.slice_failed_count = slices.iter().filter(|slice| slice.error.is_some()).count();
+    result.slices = slices;
+    result.slices_complete = true;
+
+    match write_capture_metadata(&app, &result.capture_id, &output_dir, &result).await {
+        Ok(true) => {
+            let _ = app.emit("capture-updated", result);
+        }
+        Ok(false) => {}
+        Err(error) => eprintln!("failed to persist background slices: {error}"),
+    }
+}
+
 async fn persist_project(
     app: &tauri::AppHandle,
     capture_id: &str,
     source_url: &str,
     project: LanhuProjectPayload,
 ) -> Result<CaptureResult, String> {
+    let LanhuProjectPayload {
+        resolved_url,
+        team_id,
+        project_id,
+        project_name,
+        designs: pending_designs,
+        slices: pending_slices,
+        layers,
+    } = project;
     let root = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("无法确定应用数据目录：{error}"))?
         .join("captures");
-    let directory_name = format!(
-        "{}_{}",
-        capture_id,
-        sanitize_filename(&project.project_name)
-    );
+    let directory_name = format!("{}_{}", capture_id, sanitize_filename(&project_name));
     let output_dir = root.join(directory_name);
     tokio::fs::create_dir_all(&output_dir)
         .await
@@ -1529,9 +2231,9 @@ async fn persist_project(
         .build()
         .map_err(|error| format!("无法创建下载客户端：{error}"))?;
 
-    let total = project.designs.len();
+    let total = pending_designs.len();
     let mut designs = Vec::with_capacity(total);
-    for (index, design) in project.designs.into_iter().enumerate() {
+    for (index, design) in pending_designs.into_iter().enumerate() {
         let captured = download_design(&client, &output_dir, index, design).await;
         designs.push(captured);
         let progress = (index + 1)
@@ -1547,35 +2249,12 @@ async fn persist_project(
         );
     }
 
-    let slices_total = project.slices.len();
-    let mut slices = Vec::with_capacity(slices_total);
-    for (index, slice) in project.slices.into_iter().enumerate() {
-        if let Some(captured) = download_slice(&client, &output_dir, index, slice).await {
-            slices.push(captured);
-        }
-        emit_progress(
-            app,
-            capture_id,
-            "download",
-            &format!(
-                "正在导出切图 {}/{}（WebP / mipmap-xxhdpi）",
-                index + 1,
-                slices_total
-            ),
-            94,
-        );
-    }
-
     let downloaded_count = designs
         .iter()
         .filter(|design| design.local_path.is_some())
         .count();
     let failed_count = designs.len().saturating_sub(downloaded_count);
-    let slice_downloaded_count = slices
-        .iter()
-        .filter(|slice| slice.local_path.is_some())
-        .count();
-    let slice_failed_count = slices.len().saturating_sub(slice_downloaded_count);
+    let slice_total_count = pending_slices.len();
     let captured_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1584,26 +2263,39 @@ async fn persist_project(
         capture_id: capture_id.to_string(),
         captured_at,
         source_url: source_url.to_string(),
-        resolved_url: project.resolved_url,
-        team_id: project.team_id,
-        project_id: project.project_id,
-        project_name: project.project_name,
+        resolved_url,
+        team_id,
+        project_id,
+        project_name,
         output_dir: output_dir.to_string_lossy().into_owned(),
         downloaded_count,
         failed_count,
         designs,
-        slices,
-        slice_downloaded_count,
-        slice_failed_count,
+        slices: Vec::new(),
+        slice_downloaded_count: 0,
+        slice_failed_count: 0,
+        slice_total_count,
+        slices_complete: slice_total_count == 0,
+        layers,
     };
 
-    let metadata = serde_json::to_vec_pretty(&result)
-        .map_err(|error| format!("无法生成项目元数据：{error}"))?;
-    tokio::fs::write(output_dir.join("capture.json"), metadata)
-        .await
-        .map_err(|error| format!("无法保存项目元数据：{error}"))?;
+    write_capture_metadata(app, capture_id, &output_dir, &result).await?;
 
-    emit_progress(app, capture_id, "complete", "抓取完成", 100);
+    let complete_message = if slice_total_count == 0 {
+        "设计稿和图层已就绪"
+    } else {
+        "设计稿和图层已就绪，切图正在后台下载"
+    };
+    emit_progress(app, capture_id, "complete", complete_message, 100);
+    if slice_total_count > 0 {
+        tauri::async_runtime::spawn(download_slices_in_background(
+            app.clone(),
+            client,
+            output_dir,
+            result.clone(),
+            pending_slices,
+        ));
+    }
     Ok(result)
 }
 
@@ -1622,6 +2314,7 @@ fn start_lanhu_capture(
             .inner
             .lock()
             .map_err(|_| "抓取状态不可用".to_string())?;
+        inner.cancelled.remove(&capture_id);
         inner.active.insert(capture_id.clone());
         inner
             .sources
@@ -1717,7 +2410,8 @@ async fn list_saved_captures(app: tauri::AppHandle) -> Result<Vec<CaptureResult>
         let Ok(bytes) = tokio::fs::read(metadata_path).await else {
             continue;
         };
-        if let Ok(capture) = serde_json::from_slice::<CaptureResult>(&bytes) {
+        if let Ok(mut capture) = serde_json::from_slice::<CaptureResult>(&bytes) {
+            normalize_legacy_layer_frames(&mut capture.layers);
             captures.push(capture);
         }
     }
@@ -1736,10 +2430,155 @@ fn valid_capture_id(capture_id: &str) -> bool {
 }
 
 #[tauri::command]
+async fn export_slice_variants(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, CaptureRuntime>,
+    request: ExportSliceRequest,
+) -> Result<ExportSliceResult, String> {
+    if !valid_capture_id(&request.capture_id) {
+        return Err("无效的抓取记录 ID".to_string());
+    }
+    let format = request.format.to_ascii_lowercase();
+    if !matches!(format.as_str(), "png" | "jpg" | "webp") {
+        return Err("仅支持 PNG、JPG 和 WEBP 格式".to_string());
+    }
+    let platform = request.platform.to_ascii_lowercase();
+    if !matches!(platform.as_str(), "android" | "ios") {
+        return Err("仅支持 Android 和 iOS 平台".to_string());
+    }
+
+    let mut seen_scales = HashSet::new();
+    let targets = request
+        .scales
+        .iter()
+        .filter(|scale| seen_scales.insert((*scale).clone()))
+        .map(|scale| {
+            export_target(&platform, scale)
+                .ok_or_else(|| format!("不支持的 {platform} 切图倍率：{scale}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if targets.is_empty() {
+        return Err("请至少选择一个切图倍率".to_string());
+    }
+
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法确定应用数据目录：{error}"))?
+        .join("captures");
+    let _file_guard = runtime.file_ops.lock().await;
+    let mut entries = tokio::fs::read_dir(&root)
+        .await
+        .map_err(|error| format!("无法读取抓取历史：{error}"))?;
+    let mut saved_capture = None;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("无法读取抓取历史：{error}"))?
+    {
+        if !entry
+            .file_type()
+            .await
+            .map_err(|error| format!("无法检查抓取记录：{error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        let directory = entry.path();
+        let Ok(bytes) = tokio::fs::read(directory.join("capture.json")).await else {
+            continue;
+        };
+        let Ok(capture) = serde_json::from_slice::<CaptureResult>(&bytes) else {
+            continue;
+        };
+        if capture.capture_id == request.capture_id {
+            saved_capture = Some((directory, capture));
+            break;
+        }
+    }
+    let (capture_dir, capture) = saved_capture.ok_or_else(|| "抓取记录不存在".to_string())?;
+    let slice = capture
+        .slices
+        .iter()
+        .find(|slice| slice.id == request.slice_id)
+        .ok_or_else(|| "切图不存在或尚未下载完成".to_string())?;
+    let source_path = PathBuf::from(
+        slice
+            .local_path
+            .as_deref()
+            .ok_or_else(|| "切图尚未下载完成".to_string())?,
+    );
+    if !source_path.starts_with(&capture_dir) {
+        return Err("切图文件路径无效".to_string());
+    }
+    let bytes = tokio::fs::read(&source_path)
+        .await
+        .map_err(|error| format!("无法读取切图文件：{error}"))?;
+    let source_image =
+        image::load_from_memory(&bytes).map_err(|error| format!("无法解码切图文件：{error}"))?;
+
+    let layer_frame = capture
+        .layers
+        .iter()
+        .find(|layer| layer.id == request.layer_id)
+        .and_then(|layer| layer.frame.as_ref());
+    let source_scale = if slice.output_scale.is_finite() && slice.output_scale > 0.0 {
+        slice.output_scale
+    } else {
+        3.0
+    };
+    let logical_width = layer_frame
+        .map(|frame| frame.width)
+        .filter(|width| width.is_finite() && *width > 0.0)
+        .or_else(|| slice.width.map(|width| width / source_scale))
+        .ok_or_else(|| "切图宽度无效".to_string())?;
+    let logical_height = layer_frame
+        .map(|frame| frame.height)
+        .filter(|height| height.is_finite() && *height > 0.0)
+        .or_else(|| slice.height.map(|height| height / source_scale))
+        .ok_or_else(|| "切图高度无效".to_string())?;
+
+    let output_root = capture_dir.join("exports").join(&platform);
+    let base_name = sanitize_filename(&slice.name);
+    let mut files = Vec::with_capacity(targets.len());
+    for target in targets {
+        let width = export_dimension(logical_width, target.factor)?;
+        let height = export_dimension(logical_height, target.factor)?;
+        let resized = source_image.resize_exact(width, height, FilterType::Lanczos3);
+        let encoded = encode_export_image(&resized, &format)?;
+        let target_dir = if target.directory.is_empty() {
+            output_root.clone()
+        } else {
+            output_root.join(target.directory)
+        };
+        tokio::fs::create_dir_all(&target_dir)
+            .await
+            .map_err(|error| format!("无法创建切图导出目录：{error}"))?;
+        let file_path = target_dir.join(format!("{base_name}{}.{}", target.suffix, format));
+        tokio::fs::write(&file_path, encoded)
+            .await
+            .map_err(|error| format!("无法写入切图：{error}"))?;
+        files.push(ExportedSliceFile {
+            label: target.label.to_string(),
+            path: file_path.to_string_lossy().into_owned(),
+            width,
+            height,
+        });
+    }
+
+    Ok(ExportSliceResult {
+        output_dir: output_root.to_string_lossy().into_owned(),
+        files,
+    })
+}
+
+#[tauri::command]
 async fn delete_saved_capture(app: tauri::AppHandle, capture_id: String) -> Result<(), String> {
     if !valid_capture_id(&capture_id) {
         return Err("无效的抓取记录 ID".to_string());
     }
+    let runtime = app.state::<CaptureRuntime>();
+    mark_capture_cancelled(&runtime, &capture_id);
 
     let root = app
         .path()
@@ -1778,6 +2617,7 @@ async fn delete_saved_capture(app: tauri::AppHandle, capture_id: String) -> Resu
             continue;
         }
 
+        let _file_guard = runtime.file_ops.lock().await;
         tokio::fs::remove_dir_all(directory)
             .await
             .map_err(|error| format!("无法删除抓取记录：{error}"))?;
@@ -1796,6 +2636,7 @@ pub fn run() {
             start_lanhu_capture,
             cancel_lanhu_capture,
             list_saved_captures,
+            export_slice_variants,
             delete_saved_capture
         ])
         .run(tauri::generate_context!())
@@ -1902,6 +2743,158 @@ mod tests {
     }
 
     #[test]
+    fn reads_android_coordinate_space_from_artboard_frame() {
+        let design_json = serde_json::json!({
+            "artboard": {
+                "frame": {"left": 54561, "top": 48540, "width": 375, "height": 2337}
+            }
+        });
+        assert_eq!(
+            android_coordinate_space(&design_json),
+            Some(DesignCoordinateSpace {
+                platform: "android".to_string(),
+                width: 375.0,
+                height: 2337.0,
+                unit: "dp".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn prefers_lanhu_visual_frame_for_rotated_layers() {
+        let layer = serde_json::json!({
+            "rotation": 180,
+            "frame": {"left": 273, "top": 1021, "width": 12, "height": 12},
+            "realFrame": {"left": 261, "top": 1021, "width": 12, "height": 12}
+        });
+
+        assert_eq!(
+            layer_frame(&layer),
+            Some(LayerFrame {
+                x: 261.0,
+                y: 1021.0,
+                width: 12.0,
+                height: 12.0,
+            })
+        );
+    }
+
+    #[test]
+    fn normalizes_rotated_frames_from_legacy_captures_once() {
+        let mut layer = InspectableLayer {
+            id: "legacy-flipped-icon".to_string(),
+            parent_id: None,
+            name: "icon/general/enter".to_string(),
+            layer_type: "bitmapLayer".to_string(),
+            depth: 1,
+            order: 0,
+            frame: Some(LayerFrame {
+                x: 273.0,
+                y: 1021.0,
+                width: 12.0,
+                height: 12.0,
+            }),
+            frame_is_visual: false,
+            opacity: 1.0,
+            rotation: 180.0,
+            visible: true,
+            radius: LayerRadius::default(),
+            fills: Vec::new(),
+            borders: Vec::new(),
+            shadows: Vec::new(),
+            blurs: Vec::new(),
+            text: None,
+            is_asset: true,
+            has_slice: true,
+        };
+
+        normalize_legacy_layer_frames(std::slice::from_mut(&mut layer));
+        assert_eq!(layer.frame.as_ref().unwrap().x, 261.0);
+        assert_eq!(layer.frame.as_ref().unwrap().y, 1021.0);
+        assert!(layer.frame_is_visual);
+
+        normalize_legacy_layer_frames(std::slice::from_mut(&mut layer));
+        assert_eq!(layer.frame.as_ref().unwrap().x, 261.0);
+    }
+
+    #[test]
+    fn extracts_inspectable_layers_and_prefers_path_radius() {
+        let design_json = serde_json::json!({
+            "artboard": {
+                "id": "root",
+                "name": "Screen",
+                "type": "artboard",
+                "frame": {"left": 54561, "top": 48540, "width": 375, "height": 2337},
+                "layers": [{
+                    "id": "5046:66772",
+                    "name": "Frame 427318893",
+                    "type": "artboard",
+                    "frame": {"left": 221, "top": 138, "width": 80, "height": 28},
+                    "opacity": 1,
+                    "visible": true,
+                    "radius": {"topLeft": 0, "topRight": 0, "bottomRight": 0, "bottomLeft": 0},
+                    "paths": [{
+                        "radius": {"topLeft": 20, "topRight": 20, "bottomRight": 20, "bottomLeft": 20}
+                    }],
+                    "style": {
+                        "fills": [{
+                            "type": "color",
+                            "isEnabled": true,
+                            "opacity": 1,
+                            "boundVariables": {"color": {"name": "sys/bg/bg-1"}},
+                            "color": {"value": "rgba(245,245,245,1)"}
+                        }],
+                        "borders": [],
+                        "shadows": [],
+                        "blurs": []
+                    },
+                    "layers": []
+                }]
+            }
+        });
+
+        let layers = collect_layers(&design_json);
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].frame.as_ref().unwrap().x, 0.0);
+        assert_eq!(layers[0].frame.as_ref().unwrap().y, 0.0);
+        assert_eq!(layers[1].parent_id.as_deref(), Some("root"));
+        assert_eq!(layers[1].frame.as_ref().unwrap().x, 221.0);
+        assert_eq!(layers[1].frame.as_ref().unwrap().y, 138.0);
+        assert!(!layers[1].frame_is_visual);
+        assert_eq!(layers[1].radius.top_left, 20.0);
+        assert_eq!(layers[1].fills[0].token.as_deref(), Some("sys/bg/bg-1"));
+        assert_eq!(
+            layers[1].fills[0].color.as_deref(),
+            Some("rgba(245,245,245,1)")
+        );
+    }
+
+    #[test]
+    fn links_downloadable_slice_to_its_layer_id() {
+        let design_json = serde_json::json!({
+            "artboard": {
+                "id": "root",
+                "frame": {"left": 0, "top": 0, "width": 375, "height": 800},
+                "layers": [{
+                    "id": "asset-layer",
+                    "name": "icon/inside/tab-stats-red",
+                    "type": "bitmapLayer",
+                    "frame": {"left": 242, "top": 102, "width": 12, "height": 12},
+                    "image": {"imageUrl": "https://alipic.lanhuapp.com/icon.png"},
+                    "layers": []
+                }]
+            }
+        });
+        let slices = collect_slices(&design_json);
+        let mut layers = collect_layers(&design_json);
+        link_slices_to_layers(&mut layers, &slices);
+
+        assert_eq!(slices.len(), 1);
+        assert!(layers[1].has_slice);
+        assert!(layers[1].is_asset);
+    }
+
+    #[test]
     fn skips_one_pixel_and_fully_transparent_slices() {
         let one_pixel = DynamicImage::ImageRgba8(RgbaImage::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
         assert!(should_skip_slice(&one_pixel));
@@ -1913,6 +2906,46 @@ mod tests {
         let visible =
             DynamicImage::ImageRgba8(RgbaImage::from_pixel(20, 12, Rgba([255, 255, 255, 255])));
         assert!(!should_skip_slice(&visible));
+    }
+
+    #[test]
+    fn limits_slice_exports_to_supported_platform_scales() {
+        assert_eq!(
+            export_target("android", "xxhdpi"),
+            Some(ExportTarget {
+                label: "mipmap-xxhdpi",
+                directory: "mipmap-xxhdpi",
+                suffix: "",
+                factor: 3.0,
+            })
+        );
+        assert_eq!(export_target("ios", "3x").unwrap().suffix, "@3x");
+        assert!(export_target("web", "1x").is_none());
+        assert!(export_target("android", "5x").is_none());
+    }
+
+    #[test]
+    fn calculates_slice_export_pixel_dimensions() {
+        assert_eq!(export_dimension(20.0, 1.0).unwrap(), 20);
+        assert_eq!(export_dimension(20.0, 1.5).unwrap(), 30);
+        assert_eq!(export_dimension(20.0, 4.0).unwrap(), 80);
+        assert!(export_dimension(0.0, 3.0).is_err());
+    }
+
+    #[test]
+    fn limits_slice_export_encoders_and_flattens_jpg_alpha() {
+        let transparent =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 2, Rgba([20, 40, 60, 0])));
+        assert!(encode_export_image(&transparent, "png").is_ok());
+        assert!(encode_export_image(&transparent, "webp").is_ok());
+        let jpg = encode_export_image(&transparent, "jpg").unwrap();
+        let pixel = image::load_from_memory(&jpg)
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(0, 0)
+            .0;
+        assert!(pixel.iter().all(|channel| *channel > 245));
+        assert!(encode_export_image(&transparent, "avif").is_err());
     }
 
     #[test]
