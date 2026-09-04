@@ -9,6 +9,7 @@ import {
 } from "./platform-picker";
 import { mountSliceExportPanel, showSliceExportPanel } from "./slice-export-panel";
 import { mountSidebarToggle } from "./sidebar-toggle";
+import { mountMcpLinkButton, showMcpLinkButton } from "./mcp-link-button";
 
 type CaptureProgress = {
   captureId: string;
@@ -22,6 +23,31 @@ type CaptureFailure = {
   message: string;
 };
 
+type DesignCommentReply = {
+  id: string;
+  author: string;
+  content: string;
+  createdAt: string | null;
+};
+
+type DesignComment = {
+  id: string;
+  index: number;
+  author: string;
+  content: string;
+  createdAt: string | null;
+  resolved: boolean;
+  x: number | null;
+  y: number | null;
+  sourceWidth: number | null;
+  sourceHeight: number | null;
+  versionId: string | null;
+  versionName: string | null;
+  targetId: string | null;
+  targetType: string | null;
+  replies: DesignCommentReply[];
+};
+
 type CapturedDesign = {
   id: string;
   name: string;
@@ -30,6 +56,7 @@ type CapturedDesign = {
   coordinateSpace?: PlatformFrame | null;
   updateTime: string | null;
   hasComment: boolean;
+  comments: DesignComment[];
   remoteUrl: string;
   localPath: string | null;
   error: string | null;
@@ -91,6 +118,25 @@ type LayerBlur = {
   radius: number;
 };
 
+type LayerTextStyle = {
+  content: string;
+  from: number | null;
+  to: number | null;
+  fontFamily: string | null;
+  postScriptName: string | null;
+  fontStyle: string | null;
+  fontSize: number | null;
+  fontWeight: number | null;
+  alignment: string | null;
+  verticalAlignment: string | null;
+  lineHeight: number | null;
+  lineHeightUnit: string | null;
+  letterSpacing: number | null;
+  letterSpacingUnit: string | null;
+  color: string | null;
+  token: string | null;
+};
+
 type LayerText = {
   content: string;
   fontFamily: string | null;
@@ -101,6 +147,7 @@ type LayerText = {
   letterSpacing: number | null;
   color: string | null;
   token: string | null;
+  styles?: LayerTextStyle[];
 };
 
 type InspectableLayer = {
@@ -126,6 +173,7 @@ type InspectableLayer = {
 
 type CaptureResult = {
   captureId: string;
+  dataVersion?: number;
   capturedAt: number;
   sourceUrl: string;
   resolvedUrl: string;
@@ -179,6 +227,7 @@ const emptyState = document.querySelector<HTMLElement>("#empty-state")!;
 const designInspector = document.querySelector<HTMLElement>("#design-inspector")!;
 const inspectorDetails = document.querySelector<HTMLElement>("#inspector-details")!;
 const platformPickerRoot = document.querySelector<HTMLElement>("#platform-picker-root")!;
+const mcpLinkRoot = document.querySelector<HTMLElement>("#mcp-link-root")!;
 const canvasTitle = document.querySelector<HTMLElement>("#canvas-title")!;
 const zoomOutButton = document.querySelector<HTMLButtonElement>("#zoom-out-button")!;
 const zoomInButton = document.querySelector<HTMLButtonElement>("#zoom-in-button")!;
@@ -187,6 +236,8 @@ const artboardScroll = document.querySelector<HTMLElement>("#artboard-scroll")!;
 const artboardWrap = document.querySelector<HTMLElement>("#artboard-wrap")!;
 const artboardImage = document.querySelector<HTMLImageElement>("#artboard-image")!;
 const sliceOutlines = document.querySelector<HTMLElement>("#slice-outlines")!;
+const commentMarkers = document.querySelector<HTMLElement>("#comment-markers")!;
+const commentPopover = document.querySelector<HTMLElement>("#comment-popover")!;
 const layerHighlight = document.querySelector<HTMLElement>("#layer-highlight")!;
 const layerHighlightSize = document.querySelector<HTMLElement>("#layer-highlight-size")!;
 const layerDetails = document.querySelector<HTMLElement>("#layer-details")!;
@@ -198,9 +249,12 @@ const deleteCancelButton = document.querySelector<HTMLButtonElement>("#delete-ca
 const deleteConfirmButton = document.querySelector<HTMLButtonElement>("#delete-confirm-button")!;
 const previewRoot = document.querySelector<HTMLElement>("#preview-root")!;
 
+const CURRENT_CAPTURE_VERSION = 4;
 let activeCaptureId: string | null = null;
+const replacementCaptureIds = new Map<string, string>();
 let selectedCapture: CaptureResult | null = null;
 let selectedLayerId: string | null = null;
+let selectedCommentId: string | null = null;
 let selectedPlatform: TargetPlatform = "android";
 let hitStack: { captureId: string; x: number; y: number; layerIds: string[]; index: number } | null = null;
 let panState: {
@@ -238,6 +292,7 @@ let sidebarCollapsed = storedValue(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true";
 mountPhotoPreview(previewRoot);
 mountPlatformPicker(platformPickerRoot, changeTargetPlatform);
 mountSliceExportPanel(sliceExportRoot);
+mountMcpLinkButton(mcpLinkRoot);
 mountSidebarToggle(sidebarToggleRoot, {
   collapsed: sidebarCollapsed,
   onChange: setSidebarCollapsed,
@@ -296,6 +351,10 @@ function captureSourceKey(sourceUrl: string): string {
   } catch {
     return `url:${sourceUrl.trim()}`;
   }
+}
+
+function designMcpLink(capture: CaptureResult, design: CapturedDesign): string {
+  return `designbridge://design/${encodeURIComponent(capture.projectId)}/${encodeURIComponent(design.id)}`;
 }
 
 function loadCaptureAttempts(): CaptureAttempt[] {
@@ -477,6 +536,14 @@ function currentCoordinate(): PlatformFrame | null {
   return androidFrame(design);
 }
 
+function currentDesign(capture: CaptureResult | null = selectedCapture): CapturedDesign | null {
+  return capture?.designs.find((item) => item.localPath && item.error == null) || null;
+}
+
+function designComments(design: CapturedDesign | null): DesignComment[] {
+  return design?.comments || [];
+}
+
 function applyCanvasZoom() {
   const coordinate = currentCoordinate();
   if (!coordinate) return;
@@ -486,11 +553,13 @@ function applyCanvasZoom() {
   zoomInput.value = numberValue(canvasZoom);
   zoomOutButton.disabled = canvasZoom <= MIN_CANVAS_ZOOM;
   zoomInButton.disabled = canvasZoom >= MAX_CANVAS_ZOOM;
+  window.requestAnimationFrame(positionCommentPopover);
 }
 
 function applyCanvasPan() {
   artboardWrap.style.setProperty("--canvas-pan-x", `${canvasPanX}px`);
   artboardWrap.style.setProperty("--canvas-pan-y", `${canvasPanY}px`);
+  window.requestAnimationFrame(positionCommentPopover);
 }
 
 function setCanvasZoom(nextZoom: number, anchor?: { x: number; y: number }) {
@@ -753,6 +822,7 @@ function renderEmptyCapture(state?: { title: string; detail: string }) {
   if (!state) setSelectedHistoryKey(null);
   selectedCapture = null;
   selectedLayerId = null;
+  selectedCommentId = null;
   hitStack = null;
   resultMeta.innerHTML = "";
   designInspector.classList.remove("details-open");
@@ -761,11 +831,15 @@ function renderEmptyCapture(state?: { title: string; detail: string }) {
   emptyState.classList.remove("hidden");
   artboardImage.removeAttribute("src");
   sliceOutlines.innerHTML = "";
+  commentMarkers.innerHTML = "";
+  commentPopover.classList.add("hidden");
+  commentPopover.replaceChildren();
   showSliceExportPanel(null);
   canvasPanX = 0;
   canvasPanY = 0;
   applyCanvasPan();
   updatePlatformPicker(null);
+  showMcpLinkButton(null);
   emptyState.querySelector("strong")!.textContent = state?.title || "暂无抓取结果";
   emptyState.querySelector(":scope > span")!.textContent = state?.detail || "抓取完成的画板会显示在这里";
   renderHistory();
@@ -799,6 +873,243 @@ function radiusSummary(radius: LayerRadius): string {
 
 function detailRow(label: string, value: string): string {
   return `<div class="detail-row"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`;
+}
+
+function textAlignmentLabel(value: string): string {
+  const labels: Record<string, string> = {
+    left: "左对齐",
+    center: "居中对齐",
+    right: "右对齐",
+    justify: "两端对齐",
+    justified: "两端对齐",
+  };
+  return labels[value.toLowerCase()] || value;
+}
+
+function verticalAlignmentLabel(value: string): string {
+  const labels: Record<string, string> = {
+    top: "顶部对齐",
+    center: "垂直居中对齐",
+    middle: "垂直居中对齐",
+    center_vertical: "垂直居中对齐",
+    bottom: "底部对齐",
+  };
+  return labels[value.toLowerCase()] || value;
+}
+
+function fontWeightLabel(style: LayerTextStyle): string | null {
+  if (style.fontStyle) return style.fontStyle;
+  if (style.fontWeight == null) return null;
+  const labels: Record<number, string> = {
+    100: "Thin",
+    200: "Extra Light",
+    300: "Light",
+    400: "Regular",
+    500: "Medium",
+    600: "Semi Bold",
+    700: "Bold",
+    800: "Extra Bold",
+    900: "Black",
+  };
+  return labels[Math.round(style.fontWeight)] || numberValue(style.fontWeight);
+}
+
+function textMetricValue(value: number | null, unit: string | null, defaultUnit: string): string | null {
+  if (unit?.toUpperCase() === "AUTO") return "normal";
+  if (value == null) return null;
+  const normalizedUnit = unit?.toLowerCase();
+  if (normalizedUnit === "percent" || normalizedUnit === "%") return `${numberValue(value)}%`;
+  if (normalizedUnit === "pixel" || normalizedUnit === "pixels" || normalizedUnit === "px") {
+    return `${numberValue(value)}px`;
+  }
+  return `${numberValue(value)}${defaultUnit}`;
+}
+
+function colorOpacityLabel(value: string | null): string {
+  if (!value) return "";
+  const rgba = value.match(/^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)$/i);
+  if (rgba) return `${Math.round(Number(rgba[1]) * 100)}%`;
+  return "100%";
+}
+
+function textColorRow(style: LayerTextStyle): string {
+  if (!style.color) return "";
+  return `
+    <div class="detail-row">
+      <dt>颜色</dt>
+      <dd class="text-color-value">
+        <span class="color-swatch text-color-swatch" style="--swatch-color:${safeCssColor(style.color)}"></span>
+        <span class="text-color-code">
+          <strong>${escapeHtml(colorLabel(style.color))}</strong>
+          ${style.token ? `<small>${escapeHtml(style.token)}</small>` : ""}
+        </span>
+        <span>${escapeHtml(colorOpacityLabel(style.color))}</span>
+      </dd>
+    </div>
+  `;
+}
+
+function normalizedTextStyles(text: LayerText): LayerTextStyle[] {
+  if (text.styles?.length) return text.styles;
+  return [{
+    content: text.content,
+    from: 0,
+    to: text.content.length,
+    fontFamily: text.fontFamily,
+    postScriptName: null,
+    fontStyle: null,
+    fontSize: text.fontSize,
+    fontWeight: text.fontWeight,
+    alignment: text.alignment,
+    verticalAlignment: null,
+    lineHeight: text.lineHeight,
+    lineHeightUnit: null,
+    letterSpacing: text.letterSpacing,
+    letterSpacingUnit: null,
+    color: text.color,
+    token: text.token,
+  }];
+}
+
+function textStyleMarkup(style: LayerTextStyle, showTitle: boolean): string {
+  const font = style.postScriptName || style.fontFamily;
+  const weight = fontWeightLabel(style);
+  const fontSize = textMetricValue(style.fontSize, null, selectedPlatform === "ios" ? "pt" : "sp");
+  const letterSpacing = textMetricValue(style.letterSpacing, style.letterSpacingUnit, "px");
+  const lineHeight = textMetricValue(
+    style.lineHeight,
+    style.lineHeightUnit,
+    selectedPlatform === "ios" ? "pt" : "sp",
+  );
+  return `
+    <section class="text-style-group">
+      ${showTitle ? `<h5>“ ${escapeHtml(style.content)} ”</h5>` : ""}
+      <dl class="detail-table compact">
+        ${font ? detailRow("字体", font) : ""}
+        ${weight ? detailRow("字重", weight) : ""}
+        ${style.alignment ? detailRow("对齐", textAlignmentLabel(style.alignment)) : ""}
+        ${style.verticalAlignment ? detailRow("垂直对齐", verticalAlignmentLabel(style.verticalAlignment)) : ""}
+        ${textColorRow(style)}
+        ${fontSize ? detailRow("字号", fontSize) : ""}
+        ${letterSpacing ? detailRow("字间距", letterSpacing) : ""}
+        ${lineHeight ? detailRow("行高", lineHeight) : ""}
+        ${detailRow("内容", style.content)}
+      </dl>
+    </section>
+  `;
+}
+
+function commentShortDate(value: string | null): string {
+  if (!value) return "时间未知";
+  const numericValue = Number(value);
+  const date = Number.isFinite(numericValue)
+    ? new Date(numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue)
+    : new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(date);
+}
+
+function commentAuthorBadge(author: string): string {
+  const characters = Array.from(author.trim());
+  return characters.slice(Math.max(0, characters.length - 2)).join("") || "评论";
+}
+
+function commentPoint(comment: DesignComment, coordinate: PlatformFrame): { x: number; y: number } | null {
+  if (comment.x == null || comment.y == null) return null;
+  const sourceWidth = comment.sourceWidth || coordinate.width;
+  const sourceHeight = comment.sourceHeight || coordinate.height;
+  if (sourceWidth <= 0 || sourceHeight <= 0) return null;
+  return {
+    x: (comment.x / sourceWidth) * coordinate.width,
+    y: (comment.y / sourceHeight) * coordinate.height,
+  };
+}
+
+function renderCommentMarkers(capture: CaptureResult | null) {
+  commentMarkers.replaceChildren();
+  const design = currentDesign(capture);
+  const coordinate = androidFrame(design || undefined);
+  if (!design || !coordinate) return;
+
+  const fragment = document.createDocumentFragment();
+  for (const comment of designComments(design)) {
+    const point = commentPoint(comment, coordinate);
+    if (!point) continue;
+    const left = (point.x / coordinate.width) * 100;
+    const top = (point.y / coordinate.height) * 100;
+    if (left < 0 || left > 100 || top < 0 || top > 100) continue;
+
+    const marker = document.createElement("button");
+    marker.type = "button";
+    marker.className = "comment-marker";
+    marker.classList.toggle("selected", comment.id === selectedCommentId);
+    marker.dataset.commentId = comment.id;
+    marker.style.left = `${left}%`;
+    marker.style.top = `${top}%`;
+    marker.textContent = String(comment.index);
+    marker.title = `${comment.author}: ${comment.content}`;
+    marker.setAttribute("aria-label", `评论 ${comment.index}：${comment.content}`);
+    fragment.append(marker);
+  }
+  commentMarkers.append(fragment);
+}
+
+function positionCommentPopover() {
+  if (commentPopover.classList.contains("hidden") || !selectedCommentId) return;
+  const marker = commentMarkers.querySelector<HTMLElement>(
+    `[data-comment-id="${CSS.escape(selectedCommentId)}"]`,
+  );
+  if (!marker) return;
+  const containerBounds = artboardScroll.getBoundingClientRect();
+  const markerBounds = marker.getBoundingClientRect();
+  const popoverBounds = commentPopover.getBoundingClientRect();
+  const gap = 16;
+  const edge = 12;
+  let side: "left" | "right" = "right";
+  let left = markerBounds.right - containerBounds.left + gap;
+  if (left + popoverBounds.width > containerBounds.width - edge) {
+    side = "left";
+    left = markerBounds.left - containerBounds.left - popoverBounds.width - gap;
+  }
+  left = Math.max(edge, Math.min(left, containerBounds.width - popoverBounds.width - edge));
+  const preferredTop = markerBounds.top - containerBounds.top - 64;
+  const top = Math.max(edge, Math.min(preferredTop, containerBounds.height - popoverBounds.height - edge));
+  commentPopover.dataset.side = side;
+  commentPopover.style.left = `${left}px`;
+  commentPopover.style.top = `${top}px`;
+}
+
+function renderCommentPopover(comment: DesignComment) {
+  const replies = comment.replies || [];
+  commentPopover.innerHTML = `
+    <header class="comment-popover-header">
+      <div>
+        <strong>评论</strong>
+        <span>${escapeHtml(comment.versionName || "当前版本")}</span>
+      </div>
+    </header>
+    <div class="comment-thread">
+      <span class="comment-avatar">${escapeHtml(commentAuthorBadge(comment.author))}</span>
+      <div class="comment-thread-content">
+        <div class="comment-byline">
+          <strong>${escapeHtml(comment.author)}</strong>
+          <span>${escapeHtml(commentShortDate(comment.createdAt))}</span>
+        </div>
+        <p>${escapeHtml(comment.content)}</p>
+        ${replies.map((reply) => `
+          <div class="comment-reply">
+            <div class="comment-byline">
+              <strong>${escapeHtml(reply.author)}</strong>
+              <span>${escapeHtml(commentShortDate(reply.createdAt))}</span>
+            </div>
+            <p>${escapeHtml(reply.content)}</p>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+  commentPopover.classList.remove("hidden");
+  window.requestAnimationFrame(positionCommentPopover);
 }
 
 function renderSliceOutlines(capture: CaptureResult | null) {
@@ -836,14 +1147,28 @@ function renderLayerSelection() {
   }
   const layers = captureLayers(capture);
   const layer = layers.find((item) => item.id === selectedLayerId) || null;
+  const design = currentDesign(capture);
+  const comment = designComments(design).find((item) => item.id === selectedCommentId) || null;
 
   layerHighlight.classList.add("hidden");
+  if (comment) {
+    designInspector.classList.remove("details-open");
+    inspectorDetails.classList.add("hidden");
+    layerDetails.innerHTML = "";
+    showSliceExportPanel(null);
+    renderCommentMarkers(capture);
+    renderCommentPopover(comment);
+    return;
+  }
+  commentPopover.classList.add("hidden");
+  commentPopover.replaceChildren();
   if (!layer) {
     designInspector.classList.remove("details-open");
     inspectorDetails.classList.add("hidden");
     layerDetails.innerHTML = "";
     showSliceExportPanel(null);
     scheduleInspectorFit();
+    renderCommentMarkers(capture);
     return;
   }
 
@@ -908,18 +1233,13 @@ function renderLayerSelection() {
     ),
     ...layer.blurs.map((blur) => `${blur.blurType} ${numberValue(blur.radius)}dp`),
   ];
+  const textStyles = layer.text ? normalizedTextStyles(layer.text) : [];
   const text = layer.text
     ? `
       <div class="style-subsection">
         <h4>文本</h4>
         <p class="text-content">${escapeHtml(layer.text.content)}</p>
-        <dl class="detail-table compact">
-          ${layer.text.fontFamily ? detailRow("字体", layer.text.fontFamily) : ""}
-          ${layer.text.fontSize != null ? detailRow("字号", unitValue(layer.text.fontSize)) : ""}
-          ${layer.text.fontWeight != null ? detailRow("字重", numberValue(layer.text.fontWeight)) : ""}
-          ${layer.text.alignment ? detailRow("对齐", layer.text.alignment) : ""}
-          ${layer.text.color ? detailRow("颜色", `${layer.text.token ? `${layer.text.token} · ` : ""}${colorLabel(layer.text.color)}`) : ""}
-        </dl>
+        ${textStyles.map((style) => textStyleMarkup(style, textStyles.length > 1)).join("")}
       </div>
     `
     : "";
@@ -977,16 +1297,20 @@ function renderLayerSelection() {
       if (sliceIndex >= 0) showPreview(`slice-${sliceIndex}`);
     },
   });
+  renderCommentMarkers(capture);
 }
 
 function renderCapture(capture: CaptureResult) {
   setSelectedHistoryKey(captureSourceKey(capture.sourceUrl));
   selectedCapture = capture;
   selectedLayerId = null;
+  selectedCommentId = null;
   hitStack = null;
   showSliceExportPanel(null);
   designInspector.classList.remove("details-open");
   inspectorDetails.classList.add("hidden");
+  commentPopover.classList.add("hidden");
+  commentPopover.replaceChildren();
   renderHistory();
   renderResultMeta(capture);
   emptyState.classList.add("hidden");
@@ -998,15 +1322,18 @@ function renderCapture(capture: CaptureResult) {
   const design = designIndex >= 0 ? capture.designs[designIndex] : null;
   const source = design ? localImageSource(design.localPath) : null;
   if (!design || !source) {
+    showMcpLinkButton(null);
     canvasTitle.textContent = capture.projectName;
     artboardImage.removeAttribute("src");
     artboardImage.alt = "";
     renderSliceOutlines(null);
+    renderCommentMarkers(null);
     layerDetails.innerHTML = "";
     return;
   }
 
   const coordinate = androidFrame(design);
+  showMcpLinkButton(designMcpLink(capture, design));
   canvasTitle.textContent = design.name;
   artboardImage.alt = design.name;
   canvasZoom = 100;
@@ -1016,6 +1343,7 @@ function renderCapture(capture: CaptureResult) {
   if (coordinate) applyCanvasZoom();
   artboardImage.src = source;
   renderSliceOutlines(capture);
+  renderCommentMarkers(capture);
   renderLayerSelection();
 }
 
@@ -1027,6 +1355,7 @@ function updateCapturedSlices(capture: CaptureResult) {
     renderResultMeta(capture);
     updatePlatformPicker(capture);
     renderSliceOutlines(capture);
+    renderCommentMarkers(capture);
     renderLayerSelection();
   }
   renderHistory();
@@ -1125,8 +1454,9 @@ function designPointAt(clientX: number, clientY: number) {
 }
 
 function clearLayerSelection() {
-  if (!selectedLayerId && !hitStack) return;
+  if (!selectedLayerId && !selectedCommentId && !hitStack) return;
   selectedLayerId = null;
+  selectedCommentId = null;
   hitStack = null;
   renderLayerSelection();
 }
@@ -1151,6 +1481,7 @@ function selectLayerAt(clientX: number, clientY: number) {
     ? { captureId: point.capture.captureId, x: point.x, y: point.y, layerIds, index }
     : null;
   selectedLayerId = index >= 0 ? layerIds[index] : null;
+  selectedCommentId = null;
   renderLayerSelection();
 }
 
@@ -1240,7 +1571,7 @@ async function startCapture(sourceUrl = urlInput.value.trim()) {
   }
 
   const existingCapture = history.find((capture) => captureSourceKey(capture.sourceUrl) === key);
-  if (existingCapture) {
+  if (existingCapture && (existingCapture.dataVersion ?? 0) >= CURRENT_CAPTURE_VERSION) {
     if (selectedCapture?.captureId !== existingCapture.captureId) renderCapture(existingCapture);
     else {
       setSelectedHistoryKey(key);
@@ -1251,6 +1582,7 @@ async function startCapture(sourceUrl = urlInput.value.trim()) {
     progressPanel.classList.add("hidden");
     return;
   }
+  if (existingCapture) replacementCaptureIds.set(key, existingCapture.captureId);
 
   const existingAttempt = captureAttempts.find((attempt) => attempt.key === key);
   if (existingAttempt?.status === "capturing") {
@@ -1272,7 +1604,7 @@ async function startCapture(sourceUrl = urlInput.value.trim()) {
   attempt.sourceUrl = normalizedUrl;
   attempt.captureId = null;
   attempt.status = "capturing";
-  attempt.message = "正在打开蓝湖窗口…";
+  attempt.message = existingCapture ? "正在更新旧版图层数据…" : "正在打开蓝湖窗口…";
   attempt.percent = 4;
   attempt.updatedAt = Date.now();
   if (!existingAttempt) captureAttempts.push(attempt);
@@ -1282,8 +1614,8 @@ async function startCapture(sourceUrl = urlInput.value.trim()) {
   scrollHistoryEntryIntoView(key);
 
   setCapturing(true);
-  setStatus("等待蓝湖授权", "working");
-  setProgress({ captureId: "", stage: "authorize", message: "正在打开蓝湖窗口…", percent: 4 });
+  setStatus(existingCapture ? "正在更新图层数据" : "等待蓝湖授权", "working");
+  setProgress({ captureId: "", stage: "authorize", message: attempt.message, percent: 4 });
 
   try {
     const captureId = await invoke<string>("start_lanhu_capture", { url: normalizedUrl });
@@ -1430,6 +1762,22 @@ layerDetails.addEventListener("click", (event) => {
   if (Number.isInteger(index)) showPreview(`slice-${index}`);
 });
 
+commentMarkers.addEventListener("pointerdown", (event) => {
+  event.stopPropagation();
+});
+
+commentMarkers.addEventListener("click", (event) => {
+  const marker = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-comment-id]");
+  if (!marker || !selectedCapture) return;
+  const design = currentDesign(selectedCapture);
+  const comment = designComments(design).find((item) => item.id === marker.dataset.commentId);
+  if (!comment) return;
+  selectedLayerId = null;
+  selectedCommentId = comment.id;
+  hitStack = null;
+  renderLayerSelection();
+});
+
 artboardImage.addEventListener("load", () => {
   if (!selectedCapture) return;
   const design = selectedCapture.designs.find((item) => item.localPath && item.error == null);
@@ -1449,6 +1797,7 @@ artboardImage.addEventListener("load", () => {
     updatePlatformPicker(selectedCapture);
   }
   renderSliceOutlines(selectedCapture);
+  renderCommentMarkers(selectedCapture);
 });
 
 artboardImage.addEventListener("pointerdown", (event) => {
@@ -1505,13 +1854,19 @@ artboardImage.addEventListener("pointerleave", () => {
 
 document.addEventListener("pointerdown", (event) => {
   const target = event.target as Node;
-  if (artboardImage.contains(target) || inspectorDetails.contains(target)) return;
+  if (
+    artboardImage.contains(target) ||
+    commentMarkers.contains(target) ||
+    commentPopover.contains(target) ||
+    inspectorDetails.contains(target)
+  ) return;
   clearLayerSelection();
 });
 
 window.addEventListener("resize", () => {
   applySidebarWidth(sidebarWidth);
   scheduleInspectorFit();
+  positionCommentPopover();
 });
 window.addEventListener("scroll", scheduleInspectorFit, { passive: true });
 
@@ -1542,6 +1897,8 @@ async function initialize() {
   await listen<CaptureResult>("capture-complete", ({ payload }) => {
     if (activeCaptureId && payload.captureId !== activeCaptureId) return;
     const key = captureSourceKey(payload.sourceUrl);
+    const replacedCaptureId = replacementCaptureIds.get(key);
+    replacementCaptureIds.delete(key);
     captureAttempts = captureAttempts.filter((attempt) => attempt.key !== key);
     persistCaptureAttempts();
     setCapturing(false);
@@ -1555,6 +1912,11 @@ async function initialize() {
     history = dedupeHistory([payload, ...history.filter((item) => captureSourceKey(item.sourceUrl) !== key)]);
     renderCapture(payload);
     scrollHistoryEntryIntoView(key);
+    if (replacedCaptureId && replacedCaptureId !== payload.captureId) {
+      void invoke("delete_saved_capture", { captureId: replacedCaptureId }).catch((error) => {
+        console.warn("旧版抓取记录清理失败", error);
+      });
+    }
   });
 
   await listen<CaptureResult>("capture-updated", ({ payload }) => {

@@ -93,6 +93,7 @@
                     <div class="result-meta" id="result-meta"></div>
                   </div>
                   <div class="canvas-actions">
+                    <div id="mcp-link-root"></div>
                     <div class="canvas-zoom" aria-label="画布缩放">
                       <button id="zoom-out-button" type="button" aria-label="缩小画布" title="缩小">−</button>
                       <label>
@@ -107,10 +108,12 @@
                   <div class="artboard-wrap" id="artboard-wrap">
                     <img id="artboard-image" alt="" draggable="false" />
                     <div class="slice-outlines" id="slice-outlines" aria-hidden="true"></div>
+                    <div class="comment-markers" id="comment-markers"></div>
                     <div class="layer-highlight hidden" id="layer-highlight" aria-hidden="true">
                       <span id="layer-highlight-size"></span>
                     </div>
                   </div>
+                  <aside class="comment-popover hidden" id="comment-popover" aria-label="评论详情"></aside>
                 </div>
               </section>
               <aside class="inspector-details hidden" id="inspector-details" aria-label="图层详情">

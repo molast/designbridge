@@ -845,6 +845,30 @@ h2 {
   gap: 8px;
 }
 
+.mcp-link-button {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  color: #4b5054;
+  background: #ffffff;
+  border: 1px solid #cdd1d4;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.mcp-link-button:hover {
+  color: #222522;
+  background: #f0f2f3;
+}
+
+.mcp-link-button svg {
+  flex: 0 0 auto;
+}
+
 .canvas-zoom {
   height: 30px;
   display: grid;
@@ -958,6 +982,144 @@ h2 {
   pointer-events: none;
 }
 
+.comment-markers {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.comment-marker {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #ffffff;
+  background: #287df8;
+  border: 3px solid #ffffff;
+  border-radius: 50% 50% 50% 4px;
+  box-shadow: 0 2px 5px rgba(24, 29, 34, 0.25);
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+  font-size: 15px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.comment-marker:hover,
+.comment-marker.selected {
+  background: #176de5;
+}
+
+.comment-marker:focus-visible {
+  outline: 2px solid #2f7df6;
+  outline-offset: 2px;
+}
+
+.comment-popover {
+  position: absolute;
+  z-index: 5;
+  width: min(360px, calc(100% - 24px));
+  padding: 20px 22px 18px;
+  overflow: visible;
+  color: #2f3040;
+  background: #ffffff;
+  border: 1px solid #eceef1;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(33, 38, 45, 0.15);
+  overscroll-behavior: contain;
+}
+
+.comment-popover::before {
+  position: absolute;
+  top: 48px;
+  left: -7px;
+  width: 14px;
+  height: 14px;
+  background: #ffffff;
+  border-bottom: 1px solid #eceef1;
+  border-left: 1px solid #eceef1;
+  transform: rotate(45deg);
+  content: "";
+}
+
+.comment-popover[data-side="left"]::before {
+  right: -7px;
+  left: auto;
+  border: 0;
+  border-top: 1px solid #eceef1;
+  border-right: 1px solid #eceef1;
+}
+
+.comment-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.comment-popover-header > div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.comment-popover-header strong {
+  color: #2f3040;
+  font-size: 18px;
+  font-weight: 750;
+}
+
+.comment-popover-header > div > span {
+  overflow: hidden;
+  color: #a8aab3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.comment-thread {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: start;
+  gap: 13px;
+  margin-top: 20px;
+}
+
+.comment-avatar {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  color: #ffffff;
+  background: #ff686d;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.comment-thread-content {
+  min-width: 0;
+  max-height: min(300px, calc(100vh - 300px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.comment-thread-content > p,
+.comment-reply p {
+  margin: 8px 0 0;
+  color: #747682;
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .slice-outline {
   position: absolute;
   border: 1px dashed rgba(76, 84, 92, 0.9);
@@ -1068,6 +1230,30 @@ h2 {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
+}
+
+.comment-byline {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 10px;
+  color: #858a87;
+  font-size: 11px;
+}
+
+.comment-byline strong {
+  overflow: hidden;
+  color: #30313f;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.comment-reply + .comment-reply {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #eceef1;
 }
 
 .detail-table {
@@ -1213,6 +1399,56 @@ h2 {
   font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
+}
+
+.text-style-group + .text-style-group {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #eceeeb;
+}
+
+.text-style-group h5 {
+  margin: 0 0 11px;
+  color: #343835;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.text-color-value {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.text-color-swatch {
+  width: 22px;
+  height: 22px;
+}
+
+.text-color-code {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.text-color-code strong,
+.text-color-code small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text-color-code strong {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.text-color-code small {
+  color: #858a87;
+  font-size: 9px;
 }
 
 .effect-copy {

@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "DesignBridge desktop application"
 authors = ["you"]
 edition = "2021"
+default-run = "designbridge"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -25,5 +26,7 @@ serde_json = "1"
 base64 = "0.22"
 image = "0.25"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-tokio = { version = "1", features = ["fs", "sync"] }
+tokio = { version = "1", features = ["fs", "sync", "macros", "rt-multi-thread", "io-std"] }
 url = "2"
+dirs = "6"
+rmcp = { version = "3.2", features = ["transport-io"] }

@@ -16,6 +16,10 @@ use std::{
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use url::{Host, Url};
 
+pub mod design_data;
+
+use design_data::*;
+
 const TITLE_PREFIX: &str = "__DESIGNBRIDGE__";
 const MAX_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -65,15 +69,8 @@ struct LanhuDesignPayload {
     url: String,
     update_time: Option<String>,
     has_comment: Option<bool>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct DesignCoordinateSpace {
-    platform: String,
-    width: f64,
-    height: f64,
-    unit: String,
+    #[serde(default)]
+    comments: Vec<DesignComment>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,37 +101,6 @@ struct CaptureProgress {
 struct CaptureFailure {
     capture_id: String,
     message: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CapturedDesign {
-    id: String,
-    name: String,
-    width: Option<f64>,
-    height: Option<f64>,
-    #[serde(default)]
-    coordinate_space: Option<DesignCoordinateSpace>,
-    update_time: Option<String>,
-    has_comment: bool,
-    remote_url: String,
-    local_path: Option<String>,
-    error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CapturedSlice {
-    id: String,
-    name: String,
-    width: Option<f64>,
-    height: Option<f64>,
-    remote_url: String,
-    output_format: String,
-    output_scale: f64,
-    output_dir: String,
-    local_path: Option<String>,
-    error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,132 +136,6 @@ struct ExportTarget {
     directory: &'static str,
     suffix: &'static str,
     factor: f64,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct LayerFrame {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct LayerRadius {
-    top_left: f64,
-    top_right: f64,
-    bottom_right: f64,
-    bottom_left: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct LayerPaint {
-    paint_type: String,
-    color: Option<String>,
-    token: Option<String>,
-    opacity: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct LayerBorder {
-    width: f64,
-    style: String,
-    color: Option<String>,
-    token: Option<String>,
-    opacity: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct LayerShadow {
-    shadow_type: String,
-    color: Option<String>,
-    offset_x: f64,
-    offset_y: f64,
-    blur: f64,
-    spread: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct LayerBlur {
-    blur_type: String,
-    radius: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct LayerText {
-    content: String,
-    font_family: Option<String>,
-    font_size: Option<f64>,
-    font_weight: Option<f64>,
-    alignment: Option<String>,
-    line_height: Option<f64>,
-    letter_spacing: Option<f64>,
-    color: Option<String>,
-    token: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct InspectableLayer {
-    id: String,
-    parent_id: Option<String>,
-    name: String,
-    layer_type: String,
-    depth: usize,
-    order: usize,
-    frame: Option<LayerFrame>,
-    #[serde(default)]
-    frame_is_visual: bool,
-    opacity: f64,
-    rotation: f64,
-    visible: bool,
-    radius: LayerRadius,
-    fills: Vec<LayerPaint>,
-    borders: Vec<LayerBorder>,
-    shadows: Vec<LayerShadow>,
-    blurs: Vec<LayerBlur>,
-    text: Option<LayerText>,
-    is_asset: bool,
-    has_slice: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CaptureResult {
-    capture_id: String,
-    captured_at: u64,
-    source_url: String,
-    resolved_url: String,
-    team_id: String,
-    project_id: String,
-    project_name: String,
-    output_dir: String,
-    downloaded_count: usize,
-    failed_count: usize,
-    designs: Vec<CapturedDesign>,
-    #[serde(default)]
-    slices: Vec<CapturedSlice>,
-    #[serde(default)]
-    slice_downloaded_count: usize,
-    #[serde(default)]
-    slice_failed_count: usize,
-    #[serde(default)]
-    slice_total_count: usize,
-    #[serde(default = "default_true")]
-    slices_complete: bool,
-    #[serde(default)]
-    layers: Vec<InspectableLayer>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 struct TitleMessage<'a> {
@@ -960,6 +800,7 @@ fn api_url(route: &LanhuRoute) -> Result<Url, String> {
         }
         if let Some(image_id) = route.image_id.as_deref() {
             query.append_pair("image_id", image_id);
+            query.append_pair("comment", "1");
         } else {
             query.append_pair("position", "1");
             query.append_pair("show_cb_src", "1");
@@ -1119,8 +960,350 @@ fn design_image_url(value: &serde_json::Value) -> Option<String> {
     )
 }
 
+fn string_or_number(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    for key in keys {
+        let Some(found) = object.get(*key) else {
+            continue;
+        };
+        if let Some(text) = found
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text.to_string());
+        }
+        if let Some(number) = found.as_i64() {
+            return Some(number.to_string());
+        }
+        if let Some(number) = found.as_u64() {
+            return Some(number.to_string());
+        }
+    }
+    None
+}
+
+fn decoded_json_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    if value.is_object() {
+        return Some(value.clone());
+    }
+    value
+        .as_str()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .filter(serde_json::Value::is_object)
+}
+
+fn latest_design_version(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    let versions = value.get("versions")?.as_array()?;
+    let latest_id = string_or_number(value, &["latest_version", "latestVersion"]);
+    latest_id
+        .as_deref()
+        .and_then(|latest_id| {
+            versions.iter().find(|version| {
+                string_or_number(version, &["id", "version_id", "versionId"]).as_deref()
+                    == Some(latest_id)
+            })
+        })
+        .or_else(|| versions.first())
+}
+
+fn comment_author(value: &serde_json::Value) -> String {
+    if let Some(author) = value_string(
+        value,
+        &[
+            "author_name",
+            "authorName",
+            "creator_name",
+            "creatorName",
+            "nickname",
+            "user_name",
+            "userName",
+        ],
+    ) {
+        return author;
+    }
+    for key in [
+        "author",
+        "user",
+        "creator",
+        "member",
+        "editor_info",
+        "editorInfo",
+        "create_by",
+        "createBy",
+    ] {
+        let Some(person) = value.get(key) else {
+            continue;
+        };
+        if let Some(author) = value_string(
+            person,
+            &["nickname", "name", "username", "user_name", "userName"],
+        ) {
+            return author;
+        }
+        if let Some(author) = person
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return author.to_string();
+        }
+    }
+    "未知成员".to_string()
+}
+
+fn comment_resolved(value: &serde_json::Value) -> bool {
+    for key in [
+        "resolved",
+        "is_resolved",
+        "isResolved",
+        "finished",
+        "closed",
+    ] {
+        let Some(state) = value.get(key) else {
+            continue;
+        };
+        if let Some(state) = state.as_bool() {
+            return state;
+        }
+        if let Some(state) = state.as_i64() {
+            return state != 0;
+        }
+    }
+    string_or_number(value, &["status", "state"])
+        .map(|status| {
+            matches!(
+                status.to_ascii_lowercase().as_str(),
+                "2" | "resolved" | "finished" | "done" | "closed"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn comment_position(
+    comment: &serde_json::Value,
+    design: &serde_json::Value,
+    source_width: Option<f64>,
+    source_height: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    let ext_data = comment
+        .get("extData")
+        .or_else(|| comment.get("ext_data"))
+        .and_then(decoded_json_value);
+
+    let percent_x = finite_number(comment, &["positionX", "position_x"]).or_else(|| {
+        ext_data
+            .as_ref()
+            .and_then(|ext_data| finite_number(ext_data, &["positionX", "position_x"]))
+    });
+    let percent_y = finite_number(comment, &["positionY", "position_y"]).or_else(|| {
+        ext_data
+            .as_ref()
+            .and_then(|ext_data| finite_number(ext_data, &["positionY", "position_y"]))
+    });
+    if let (Some(percent_x), Some(percent_y), Some(width), Some(height)) =
+        (percent_x, percent_y, source_width, source_height)
+    {
+        if (0.0..=1.0).contains(&percent_x) && (0.0..=1.0).contains(&percent_y) {
+            return (Some(percent_x * width), Some(percent_y * height));
+        }
+    }
+
+    let Some(position) = ext_data
+        .as_ref()
+        .and_then(|ext_data| ext_data.get("position"))
+        .and_then(decoded_json_value)
+    else {
+        return (None, None);
+    };
+    let Some(absolute_x) = finite_number(&position, &["x", "left"]) else {
+        return (None, None);
+    };
+    let Some(absolute_y) = finite_number(&position, &["y", "top"]) else {
+        return (None, None);
+    };
+    let origin_x = finite_number(design, &["position_x", "positionX", "x"]).unwrap_or(0.0);
+    let origin_y = finite_number(design, &["position_y", "positionY", "y"]).unwrap_or(0.0);
+
+    let within_source = |x: f64, y: f64| match (source_width, source_height) {
+        (Some(width), Some(height)) => x >= 0.0 && y >= 0.0 && x <= width && y <= height,
+        _ => x >= 0.0 && y >= 0.0,
+    };
+    let local_x = absolute_x - origin_x;
+    let local_y = absolute_y - origin_y;
+    if within_source(local_x, local_y) {
+        (Some(local_x), Some(local_y))
+    } else if within_source(absolute_x, absolute_y) {
+        (Some(absolute_x), Some(absolute_y))
+    } else {
+        (None, None)
+    }
+}
+
+fn comment_target(value: &serde_json::Value) -> (Option<String>, Option<String>) {
+    let ext_data = value
+        .get("extData")
+        .or_else(|| value.get("ext_data"))
+        .and_then(decoded_json_value);
+    let direct_target_id =
+        string_or_number(value, &["resource_id", "resourceId", "layer_id", "layerId"]);
+    let ext_target_id = ext_data.as_ref().and_then(|ext_data| {
+        string_or_number(
+            ext_data,
+            &[
+                "image_id",
+                "imageId",
+                "resource_id",
+                "resourceId",
+                "layer_id",
+                "layerId",
+            ],
+        )
+    });
+    let target_type = string_or_number(
+        value,
+        &["resource_type", "resourceType", "target_type", "targetType"],
+    )
+    .or_else(|| {
+        ext_data.as_ref().and_then(|ext_data| {
+            string_or_number(
+                ext_data,
+                &["resource_type", "resourceType", "target_type", "targetType"],
+            )
+        })
+    });
+    let target_id = if target_type.as_deref() == Some("3") {
+        ext_target_id.or(direct_target_id)
+    } else {
+        direct_target_id.or(ext_target_id)
+    };
+    (target_id, target_type)
+}
+
+fn comment_replies(value: &serde_json::Value) -> Vec<DesignCommentReply> {
+    let replies = find_array(
+        value,
+        &["replies", "replys", "reply_list", "replyList", "children"],
+    );
+    replies
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, reply)| {
+            let content = value_string(
+                reply,
+                &["content", "comment", "text", "message", "description"],
+            )?;
+            Some(DesignCommentReply {
+                id: string_or_number(reply, &["id", "comment_id", "commentId"])
+                    .unwrap_or_else(|| format!("reply-{}", index + 1)),
+                author: comment_author(reply),
+                content,
+                created_at: string_or_number(
+                    reply,
+                    &[
+                        "create_time",
+                        "createTime",
+                        "created_at",
+                        "createdAt",
+                        "time",
+                    ],
+                ),
+            })
+        })
+        .collect()
+}
+
+fn collect_design_comments(value: &serde_json::Value) -> Vec<DesignComment> {
+    let version = latest_design_version(value);
+    let version_id =
+        version.and_then(|version| string_or_number(version, &["id", "version_id", "versionId"]));
+    let version_name = version.and_then(|version| {
+        value_string(
+            version,
+            &[
+                "version_info",
+                "versionInfo",
+                "name",
+                "version_name",
+                "versionName",
+            ],
+        )
+    });
+    let source_width = version
+        .and_then(|version| value_number(version, &["width", "w"]))
+        .or_else(|| value_number(value, &["width", "w"]));
+    let source_height = version
+        .and_then(|version| value_number(version, &["height", "h"]))
+        .or_else(|| value_number(value, &["height", "h"]));
+    let comments = version
+        .and_then(|version| find_array(version, &["comments", "comment_list", "commentList"]))
+        .or_else(|| find_array(value, &["comments", "comment_list", "commentList"]));
+
+    comments
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(position, comment)| {
+            let content = value_string(
+                comment,
+                &["content", "comment", "text", "message", "description"],
+            )?;
+            let index = string_or_number(
+                comment,
+                &[
+                    "index",
+                    "number",
+                    "order",
+                    "sequence",
+                    "serial_number",
+                    "serialNumber",
+                    "text",
+                ],
+            )
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(position + 1);
+            let (x, y) = comment_position(comment, value, source_width, source_height);
+            let (target_id, target_type) = comment_target(comment);
+            Some(DesignComment {
+                id: string_or_number(
+                    comment,
+                    &["id", "comment_id", "commentId", "anchor_uuid", "anchorUuid"],
+                )
+                .unwrap_or_else(|| format!("comment-{index}")),
+                index,
+                author: comment_author(comment),
+                content,
+                created_at: string_or_number(
+                    comment,
+                    &[
+                        "create_time",
+                        "createTime",
+                        "created_at",
+                        "createdAt",
+                        "time",
+                    ],
+                ),
+                resolved: comment_resolved(comment),
+                x,
+                y,
+                source_width,
+                source_height,
+                version_id: version_id.clone(),
+                version_name: version_name.clone(),
+                target_id,
+                target_type,
+                replies: comment_replies(comment),
+            })
+        })
+        .collect()
+}
+
 fn design_from_value(value: &serde_json::Value, fallback_id: &str) -> Option<LanhuDesignPayload> {
-    let url = design_image_url(value)?;
+    let version = latest_design_version(value).unwrap_or(&serde_json::Value::Null);
+    let url = design_image_url(value).or_else(|| design_image_url(version))?;
+    let comments = collect_design_comments(value);
     Some(LanhuDesignPayload {
         id: value_string(value, &["id", "image_id", "imageId", "web_id"])
             .unwrap_or_else(|| fallback_id.to_string()),
@@ -1134,6 +1317,7 @@ fn design_from_value(value: &serde_json::Value, fallback_id: &str) -> Option<Lan
             .get("has_comment")
             .or_else(|| value.get("hasComment"))
             .and_then(serde_json::Value::as_bool),
+        comments,
     })
 }
 
@@ -1305,13 +1489,87 @@ fn layer_blurs(value: &serde_json::Value) -> Vec<LayerBlur> {
         .collect()
 }
 
+fn exact_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+}
+
+fn text_range_index(value: &serde_json::Value, key: &str) -> Option<usize> {
+    finite_number(value, &[key])
+        .filter(|index| *index >= 0.0 && index.fract() == 0.0)
+        .map(|index| index as usize)
+}
+
+fn text_metric(font: &serde_json::Value, key: &str) -> (Option<f64>, Option<String>) {
+    let Some(metric) = font.get(key) else {
+        return (None, None);
+    };
+    match metric {
+        serde_json::Value::Object(_) => (
+            finite_number(metric, &["value"]),
+            value_string(metric, &["unit"]),
+        ),
+        _ => (finite_number(font, &[key]), None),
+    }
+}
+
+fn text_content_for_range(content: &str, from: Option<usize>, to: Option<usize>) -> String {
+    let Some((from, to)) = from.zip(to) else {
+        return String::new();
+    };
+    if to < from {
+        return String::new();
+    }
+    content.chars().skip(from).take(to - from).collect()
+}
+
+fn layer_text_style(value: &serde_json::Value, full_content: &str) -> LayerTextStyle {
+    let font = value.get("font").unwrap_or(value);
+    let color = value.get("color").unwrap_or(value);
+    let from = text_range_index(value, "from");
+    let to = text_range_index(value, "to");
+    let (line_height, line_height_unit) = text_metric(font, "lineHeight");
+    let (letter_spacing, letter_spacing_unit) = text_metric(font, "letterSpacing");
+    let content = exact_string(value, &["content"])
+        .unwrap_or_else(|| text_content_for_range(full_content, from, to));
+
+    LayerTextStyle {
+        content,
+        from,
+        to,
+        font_family: value_string(font, &["name", "fontFamily"]),
+        post_script_name: value_string(font, &["postScriptName"]),
+        font_style: value_string(font, &["type", "style"]),
+        font_size: finite_number(font, &["size", "fontSize"]),
+        font_weight: finite_number(font, &["fontWeight", "weight"]),
+        alignment: value_string(font, &["align", "textAlign"]),
+        vertical_alignment: value_string(font, &["verticalAlignment", "verticalAlign"]),
+        line_height,
+        line_height_unit,
+        letter_spacing,
+        letter_spacing_unit,
+        color: value_string(color, &["value", "hex"]),
+        token: color_token(color),
+    }
+}
+
 fn layer_text(value: &serde_json::Value) -> Option<LayerText> {
     let text = value.get("text")?;
     let style = text.get("style").unwrap_or(text);
     let font = style.get("font").unwrap_or(style);
     let content =
-        value_string(text, &["value", "content"]).or_else(|| value_string(style, &["content"]))?;
+        exact_string(text, &["value", "content"]).or_else(|| exact_string(style, &["content"]))?;
     let color = style.get("color").unwrap_or(style);
+    let styles = text
+        .get("styles")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|style| layer_text_style(style, &content))
+        .filter(|style| !style.content.is_empty())
+        .collect();
     Some(LayerText {
         content,
         font_family: value_string(font, &["name", "fontFamily", "postScriptName"]),
@@ -1328,6 +1586,7 @@ fn layer_text(value: &serde_json::Value) -> Option<LayerText> {
             .or_else(|| finite_number(font, &["letterSpacing"])),
         color: value_string(color, &["value", "hex"]),
         token: color_token(color),
+        styles,
     })
 }
 
@@ -1420,6 +1679,44 @@ fn link_slices_to_layers(layers: &mut [InspectableLayer], slices: &[LanhuSlicePa
     for layer in layers {
         layer.has_slice = slice_ids.contains(layer.id.as_str());
         layer.is_asset |= layer.has_slice;
+    }
+}
+
+fn align_layer_bound_comments(designs: &mut [LanhuDesignPayload], layers: &[InspectableLayer]) {
+    for design in designs {
+        let Some(coordinate_space) = design.coordinate_space.as_ref() else {
+            continue;
+        };
+        for comment in &mut design.comments {
+            let Some(target_id) = comment.target_id.as_deref() else {
+                continue;
+            };
+            if target_id == design.id {
+                continue;
+            }
+            let Some(frame) = layers
+                .iter()
+                .find(|layer| layer.id == target_id)
+                .and_then(|layer| layer.frame.as_ref())
+            else {
+                continue;
+            };
+            let (Some(x), Some(y), Some(source_width), Some(source_height)) = (
+                comment.x,
+                comment.y,
+                comment.source_width,
+                comment.source_height,
+            ) else {
+                continue;
+            };
+            if source_width <= 0.0 || source_height <= 0.0 {
+                continue;
+            }
+            comment.x = Some(frame.x + (x / source_width) * frame.width);
+            comment.y = Some(frame.y + (y / source_height) * frame.height);
+            comment.source_width = Some(coordinate_space.width);
+            comment.source_height = Some(coordinate_space.height);
+        }
     }
 }
 
@@ -1766,6 +2063,7 @@ async fn fetch_and_persist_lanhu(
         project.slices = collect_slices(&design_json);
         project.layers = collect_layers(&design_json);
         link_slices_to_layers(&mut project.layers, &project.slices);
+        align_layer_bound_comments(&mut project.designs, &project.layers);
     }
 
     if project.slices.is_empty() {
@@ -1852,6 +2150,7 @@ async fn download_design(
     index: usize,
     design: LanhuDesignPayload,
 ) -> CapturedDesign {
+    let has_comment = design.has_comment.unwrap_or(!design.comments.is_empty());
     let mut captured = CapturedDesign {
         id: design.id,
         name: design.name,
@@ -1859,7 +2158,8 @@ async fn download_design(
         height: design.height,
         coordinate_space: design.coordinate_space,
         update_time: design.update_time,
-        has_comment: design.has_comment.unwrap_or(false),
+        has_comment,
+        comments: design.comments,
         remote_url: design.url.clone(),
         local_path: None,
         error: None,
@@ -2261,6 +2561,7 @@ async fn persist_project(
         .as_secs();
     let result = CaptureResult {
         capture_id: capture_id.to_string(),
+        data_version: 4,
         captured_at,
         source_url: source_url.to_string(),
         resolved_url,
@@ -2761,6 +3062,61 @@ mod tests {
     }
 
     #[test]
+    fn extracts_comments_from_the_latest_design_version() {
+        let design = serde_json::json!({
+            "id": "design-1",
+            "name": "Commented design",
+            "width": 187.5,
+            "height": 400,
+            "url": "https://alipic.lanhuapp.com/design.png",
+            "latest_version": "version-2",
+            "versions": [
+                {
+                    "id": "version-1",
+                    "version_info": "版本1",
+                    "width": 187.5,
+                    "height": 400,
+                    "comments": [{"id": "old", "content": "旧评论"}]
+                },
+                {
+                    "id": "version-2",
+                    "version_info": "版本2",
+                    "width": 187.5,
+                    "height": 400,
+                    "comments": [{
+                        "id": "comment-1",
+                        "content": "夜间#042A36-#440A0B",
+                        "create_time": 1787739576,
+                        "position_x": 0.25,
+                        "position_y": 0.5,
+                        "text": "7",
+                        "user": {"nickname": "郑向萍"},
+                        "replies": [{
+                            "id": "reply-1",
+                            "content": "已确认",
+                            "user": {"name": "Reviewer"}
+                        }]
+                    }]
+                }
+            ]
+        });
+
+        let captured = design_from_value(&design, "fallback").expect("valid design");
+        assert_eq!(captured.comments.len(), 1);
+        let comment = &captured.comments[0];
+        assert_eq!(comment.id, "comment-1");
+        assert_eq!(comment.index, 7);
+        assert_eq!(comment.author, "郑向萍");
+        assert_eq!(comment.content, "夜间#042A36-#440A0B");
+        assert_eq!(comment.created_at.as_deref(), Some("1787739576"));
+        assert_eq!(comment.x, Some(46.875));
+        assert_eq!(comment.y, Some(200.0));
+        assert_eq!(comment.version_id.as_deref(), Some("version-2"));
+        assert_eq!(comment.version_name.as_deref(), Some("版本2"));
+        assert_eq!(comment.replies[0].content, "已确认");
+    }
+
+    #[test]
     fn prefers_lanhu_visual_frame_for_rotated_layers() {
         let layer = serde_json::json!({
             "rotation": 180,
@@ -2867,6 +3223,79 @@ mod tests {
             layers[1].fills[0].color.as_deref(),
             Some("rgba(245,245,245,1)")
         );
+    }
+
+    #[test]
+    fn extracts_every_rich_text_style_run() {
+        let design_json = serde_json::json!({
+            "artboard": {
+                "id": "root",
+                "frame": {"left": 0, "top": 0, "width": 375, "height": 800},
+                "layers": [{
+                    "id": "mixed-text",
+                    "name": "Goalkeeper, #22",
+                    "type": "textLayer",
+                    "frame": {"left": 82, "top": 150, "width": 90, "height": 14},
+                    "text": {
+                        "value": "Goalkeeper, #22",
+                        "style": {
+                            "content": "Goalkeeper, #22",
+                            "font": {"name": "Sofascore Sans", "size": 12, "fontWeight": 400},
+                            "color": {"value": "rgba(153,153,153,1)"}
+                        },
+                        "styles": [
+                            {
+                                "from": 0,
+                                "to": 12,
+                                "content": "Goalkeeper, ",
+                                "font": {
+                                    "name": "Sofascore Sans",
+                                    "postScriptName": "Sofascore Sans-Regular",
+                                    "type": "Regular",
+                                    "size": 12,
+                                    "fontWeight": 400,
+                                    "align": "left",
+                                    "verticalAlignment": "center",
+                                    "letterSpacing": {"unit": "percent", "value": 0},
+                                    "lineHeight": {"unit": "AUTO"}
+                                },
+                                "color": {"value": "rgba(153,153,153,1)"}
+                            },
+                            {
+                                "from": 12,
+                                "to": 15,
+                                "content": "#22",
+                                "font": {
+                                    "name": "Sofascore Sans",
+                                    "postScriptName": "Sofascore Sans-Regular",
+                                    "type": "Regular",
+                                    "size": 12,
+                                    "fontWeight": 400,
+                                    "align": "left",
+                                    "verticalAlignment": "center",
+                                    "letterSpacing": {"unit": "percent", "value": 0},
+                                    "lineHeight": {"unit": "AUTO"}
+                                },
+                                "color": {"value": "rgba(208,164,5,1)"}
+                            }
+                        ]
+                    },
+                    "layers": []
+                }]
+            }
+        });
+
+        let layers = collect_layers(&design_json);
+        let text = layers[1].text.as_ref().expect("text layer");
+        assert_eq!(text.styles.len(), 2);
+        assert_eq!(text.styles[0].content, "Goalkeeper, ");
+        assert_eq!(
+            text.styles[0].letter_spacing_unit.as_deref(),
+            Some("percent")
+        );
+        assert_eq!(text.styles[0].line_height_unit.as_deref(), Some("AUTO"));
+        assert_eq!(text.styles[1].content, "#22");
+        assert_eq!(text.styles[1].color.as_deref(), Some("rgba(208,164,5,1)"));
     }
 
     #[test]

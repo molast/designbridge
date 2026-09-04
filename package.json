@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "./start.sh",
+    "mcp": "./mcp.sh",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
