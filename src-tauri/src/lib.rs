@@ -7,6 +7,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::Cursor,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
@@ -2928,6 +2929,57 @@ async fn delete_saved_capture(app: tauri::AppHandle, capture_id: String) -> Resu
     Err("抓取记录不存在".to_string())
 }
 
+#[tauri::command]
+fn install_codex_plugin(app: tauri::AppHandle) -> Result<String, String> {
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法确定 DesignBridge 项目目录".to_string())?;
+    let bundled_installer = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("无法确定客户端资源目录：{error}"))?
+        .join("designbridge-installer");
+    let installer_root = if bundled_installer.join("install-plugin.sh").is_file() {
+        bundled_installer
+    } else if project_root.join("install-plugin.sh").is_file() {
+        project_root
+    } else {
+        return Err("客户端中缺少 DesignBridge 插件安装资源，请重新安装最新版客户端".to_string());
+    };
+    let script = installer_root.join("install-plugin.sh");
+
+    let script_arg = script.to_string_lossy().into_owned();
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("/bin/zsh");
+        command
+            .arg("-lic")
+            .arg("exec /bin/bash \"$1\"")
+            .arg("designbridge-install")
+            .arg(&script_arg);
+        command
+    } else {
+        let mut command = Command::new("bash");
+        command.arg(&script);
+        command
+    };
+    let output = command
+        .current_dir(&installer_root)
+        .output()
+        .map_err(|error| format!("无法启动插件安装程序：{error}"))?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if detail.is_empty() {
+        Err(format!("插件安装失败（退出码 {:?}）", output.status.code()))
+    } else {
+        Err(detail)
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2938,7 +2990,8 @@ pub fn run() {
             cancel_lanhu_capture,
             list_saved_captures,
             export_slice_variants,
-            delete_saved_capture
+            delete_saved_capture,
+            install_codex_plugin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -216,6 +216,7 @@ const progressMessage = document.querySelector<HTMLElement>("#progress-message")
 const progressValue = document.querySelector<HTMLElement>("#progress-value")!;
 const progressBar = document.querySelector<HTMLElement>("#progress-bar")!;
 const appStatus = document.querySelector<HTMLElement>("#app-status")!;
+const installPluginButton = document.querySelector<HTMLButtonElement>("#install-plugin-button")!;
 const historyCount = document.querySelector<HTMLElement>("#history-count")!;
 const historyList = document.querySelector<HTMLElement>("#history-list")!;
 const sidebar = document.querySelector<HTMLElement>("#sidebar")!;
@@ -353,8 +354,9 @@ function captureSourceKey(sourceUrl: string): string {
   }
 }
 
-function designMcpLink(capture: CaptureResult, design: CapturedDesign): string {
-  return `designbridge://design/${encodeURIComponent(capture.projectId)}/${encodeURIComponent(design.id)}`;
+function designMcpLink(capture: CaptureResult, design: CapturedDesign, nodeId: string | null = null): string {
+  const link = `designbridge://design/${encodeURIComponent(capture.projectId)}/${encodeURIComponent(design.id)}`;
+  return nodeId ? `${link}?node-id=${encodeURIComponent(nodeId)}` : link;
 }
 
 function loadCaptureAttempts(): CaptureAttempt[] {
@@ -649,6 +651,25 @@ function showPreview(key: string) {
 function setStatus(label: string, tone: "idle" | "working" | "success" | "error" = "idle") {
   appStatus.className = `app-status ${tone}`;
   appStatus.querySelector("span:last-child")!.textContent = label;
+}
+
+async function installCodexPlugin() {
+  installPluginButton.disabled = true;
+  installPluginButton.textContent = "正在安装…";
+  setStatus("正在安装 Codex 插件", "working");
+  clearError();
+
+  try {
+    await invoke<string>("install_codex_plugin");
+    installPluginButton.textContent = "插件与 MCP 已安装";
+    setStatus("安装完成，请完全退出并重新打开 Codex，然后新建任务", "success");
+  } catch (error) {
+    installPluginButton.textContent = "安装失败，重试";
+    setStatus("插件安装失败", "error");
+    showError(String(error));
+  } finally {
+    installPluginButton.disabled = false;
+  }
 }
 
 function showError(message: string) {
@@ -1149,6 +1170,7 @@ function renderLayerSelection() {
   const layer = layers.find((item) => item.id === selectedLayerId) || null;
   const design = currentDesign(capture);
   const comment = designComments(design).find((item) => item.id === selectedCommentId) || null;
+  showMcpLinkButton(design ? designMcpLink(capture, design, layer?.id || null) : null);
 
   layerHighlight.classList.add("hidden");
   if (comment) {
@@ -1636,6 +1658,8 @@ captureForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void startCapture();
 });
+
+installPluginButton.addEventListener("click", () => void installCodexPlugin());
 
 cancelButton.addEventListener("click", async () => {
   if (!activeCaptureId || !activeCaptureKey) return;

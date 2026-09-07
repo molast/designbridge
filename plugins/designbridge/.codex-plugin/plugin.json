@@ -1,0 +1,42 @@
+{
+  "name": "designbridge",
+  "version": "0.1.0",
+  "description": "Use locally captured Lanhu designs in Codex to inspect UI layers, styles, slices, and comments while implementing interfaces.",
+  "author": {
+    "name": "DesignBridge"
+  },
+  "homepage": "https://github.com/molast/designbridge",
+  "repository": "https://github.com/molast/designbridge",
+  "license": "MIT",
+  "keywords": [
+    "lanhu",
+    "design",
+    "design-to-code",
+    "ui-implementation",
+    "layers",
+    "slices",
+    "comments"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "DesignBridge",
+    "shortDescription": "Implement UI from captured Lanhu designs",
+    "longDescription": "DesignBridge connects Codex to locally captured Lanhu designs. Use a designbridge:// link to inspect a whole design or a selected module, read nested layers and styles, retrieve linked slices, and apply nearby Lanhu comments as implementation constraints in the current business project.",
+    "developerName": "DesignBridge",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Implement this UI module from a DesignBridge link",
+      "Inspect the selected Lanhu layer and its child layers",
+      "Find the slices and comments needed for this design"
+    ],
+    "brandColor": "#E44B4B",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/icon.png",
+    "logoDark": "./assets/icon.png"
+  },
+  "mcpServers": "./.mcp.json"
+}

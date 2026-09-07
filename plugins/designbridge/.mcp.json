@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "designbridge": {
+      "title": "DesignBridge",
+      "description": "Read locally captured Lanhu designs, layers, slices, comments, and screenshots.",
+      "cwd": ".",
+      "command": "bash",
+      "args": [
+        "./scripts/mcp.sh"
+      ]
+    }
+  }
+}

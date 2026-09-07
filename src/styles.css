@@ -147,6 +147,16 @@ button:disabled {
   gap: 8px;
 }
 
+.plugin-install-button {
+  height: 30px;
+  padding: 0 11px;
+  font-size: 11px;
+}
+
+.plugin-install-button:disabled {
+  opacity: 0.65;
+}
+
 .app-status {
   height: 30px;
   display: flex;

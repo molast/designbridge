@@ -9,6 +9,7 @@
     "mcp": "./mcp.sh",
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:bundle": "pnpm build && ./scripts/prepare_bundle.sh",
     "preview": "vite preview",
     "tauri": "tauri"
   },
