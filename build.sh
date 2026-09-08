@@ -15,10 +15,19 @@ if [[ ! -x node_modules/.bin/tauri || ! -x node_modules/.bin/vite ]]; then
   pnpm install
 fi
 
+bundle_dir="$SCRIPT_DIR/src-tauri/target/release/bundle"
+for artifact_dir in "$bundle_dir/macos" "$bundle_dir/dmg"; do
+  if [[ -d "$artifact_dir" ]]; then
+    find "$artifact_dir" -maxdepth 1 -type f \( \
+      -name 'DesignBridge_*.dmg' -o \
+      -name 'rw.*.DesignBridge_*.dmg' \
+    \) -delete
+  fi
+done
+
 echo "正在打包 DesignBridge 正式版..."
 pnpm tauri build --no-sign "$@"
 
-bundle_dir="$SCRIPT_DIR/src-tauri/target/release/bundle"
 if [[ -d "$bundle_dir" ]]; then
   echo
   echo "打包完成，产物目录：$bundle_dir"
