@@ -9,7 +9,7 @@ import {
 } from "./platform-picker";
 import { mountSliceExportPanel, showSliceExportPanel } from "./slice-export-panel";
 import { mountSidebarToggle } from "./sidebar-toggle";
-import { mountMcpLinkButton, showMcpLinkButton } from "./mcp-link-button";
+import { mountMcpLinkButton, showMcpLinkButton, type McpLinkTarget } from "./mcp-link-button";
 
 type CaptureProgress = {
   captureId: string;
@@ -356,7 +356,22 @@ function captureSourceKey(sourceUrl: string): string {
 
 function designMcpLink(capture: CaptureResult, design: CapturedDesign, nodeId: string | null = null): string {
   const link = `designbridge://design/${encodeURIComponent(capture.projectId)}/${encodeURIComponent(design.id)}`;
-  return nodeId ? `${link}?node-id=${encodeURIComponent(nodeId)}` : link;
+  if (!nodeId) return link;
+
+  const query = new URLSearchParams();
+  query.set("node-id", nodeId);
+  return `${link}?${query.toString()}`;
+}
+
+function designMcpTarget(
+  capture: CaptureResult,
+  design: CapturedDesign,
+  layer: InspectableLayer | null = null,
+): McpLinkTarget {
+  return {
+    link: designMcpLink(capture, design, layer?.id || null),
+    layerName: layer?.name || null,
+  };
 }
 
 function loadCaptureAttempts(): CaptureAttempt[] {
@@ -1170,7 +1185,7 @@ function renderLayerSelection() {
   const layer = layers.find((item) => item.id === selectedLayerId) || null;
   const design = currentDesign(capture);
   const comment = designComments(design).find((item) => item.id === selectedCommentId) || null;
-  showMcpLinkButton(design ? designMcpLink(capture, design, layer?.id || null) : null);
+  showMcpLinkButton(design ? designMcpTarget(capture, design, layer) : null);
 
   layerHighlight.classList.add("hidden");
   if (comment) {
@@ -1278,6 +1293,7 @@ function renderLayerSelection() {
       <h3>样式信息</h3>
       <dl class="detail-table">
         ${detailRow("图层", layer.name)}
+        ${detailRow("节点 ID", layer.id)}
         ${detailRow("类型", layerTypeLabel(layer.layerType))}
         ${parent ? detailRow("父级", parent.name) : ""}
         ${frameRows}
@@ -1355,7 +1371,7 @@ function renderCapture(capture: CaptureResult) {
   }
 
   const coordinate = androidFrame(design);
-  showMcpLinkButton(designMcpLink(capture, design));
+  showMcpLinkButton(designMcpTarget(capture, design));
   canvasTitle.textContent = design.name;
   artboardImage.alt = design.name;
   canvasZoom = 100;

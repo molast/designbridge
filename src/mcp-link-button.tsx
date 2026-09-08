@@ -2,16 +2,21 @@ import { Check, Copy } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-let currentLink: string | null = null;
-let updateLink: ((link: string | null) => void) | null = null;
+let currentTarget: McpLinkTarget | null = null;
+let updateLink: ((target: McpLinkTarget | null) => void) | null = null;
+
+export type McpLinkTarget = {
+  link: string;
+  layerName?: string | null;
+};
 
 export function mountMcpLinkButton(element: HTMLElement) {
   createRoot(element).render(<McpLinkButton />);
 }
 
-export function showMcpLinkButton(link: string | null) {
-  currentLink = link;
-  updateLink?.(link);
+export function showMcpLinkButton(link: string | McpLinkTarget | null) {
+  currentTarget = typeof link === "string" ? { link } : link;
+  updateLink?.(currentTarget);
 }
 
 async function writeClipboard(value: string) {
@@ -32,13 +37,13 @@ async function writeClipboard(value: string) {
 }
 
 function McpLinkButton() {
-  const [link, setLink] = useState<string | null>(currentLink);
+  const [target, setTarget] = useState<McpLinkTarget | null>(currentTarget);
   const [copied, setCopied] = useState(false);
   const resetTimer = useRef<number | null>(null);
 
   useEffect(() => {
-    updateLink = (nextLink) => {
-      setLink(nextLink);
+    updateLink = (nextTarget) => {
+      setTarget(nextTarget);
       setCopied(false);
     };
     return () => {
@@ -47,17 +52,18 @@ function McpLinkButton() {
     };
   }, []);
 
-  if (!link) return null;
+  if (!target) return null;
 
   const copyLink = async () => {
-    await writeClipboard(link);
+    await writeClipboard(target.link);
     setCopied(true);
     if (resetTimer.current != null) window.clearTimeout(resetTimer.current);
     resetTimer.current = window.setTimeout(() => setCopied(false), 1600);
   };
 
   const Icon = copied ? Check : Copy;
-  const label = copied ? "已复制" : "复制 MCP 链接";
+  const scope = target.layerName ? `图层“${target.layerName}”` : "整张设计稿";
+  const label = copied ? "已复制" : `复制${scope} MCP 链接`;
 
   return (
     <button
@@ -69,7 +75,7 @@ function McpLinkButton() {
       onPointerUp={(event) => event.currentTarget.blur()}
     >
       <Icon aria-hidden="true" size={15} strokeWidth={1.8} />
-      <span>{copied ? "已复制" : "MCP 链接"}</span>
+      <span>{copied ? "已复制" : target.layerName ? "复制图层链接" : "MCP 链接"}</span>
     </button>
   );
 }

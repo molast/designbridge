@@ -1050,6 +1050,22 @@ mod tests {
     }
 
     #[test]
+    fn keeps_different_layer_links_distinct() {
+        let first = parse_design_reference(
+            "designbridge://design/project-1/image-2?node-id=layer%3Afirst",
+        )
+        .unwrap();
+        let second = parse_design_reference(
+            "designbridge://design/project-1/image-2?node-id=layer%3Asecond",
+        )
+        .unwrap();
+
+        assert_ne!(first.node_id, second.node_id);
+        assert_eq!(first.project_id, second.project_id);
+        assert_eq!(first.image_id, second.image_id);
+    }
+
+    #[test]
     fn parses_lanhu_hash_query() {
         let reference = parse_design_reference(
             "https://lanhuapp.com/web/#/item/project/detailDetach?pid=p1&project_id=p1&image_id=i1",
