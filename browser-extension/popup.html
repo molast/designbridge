@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>DesignBridge</title>
+  </head>
+  <body>
+    <header>
+      <span class="brand-mark" aria-hidden="true">DB</span>
+      <div>
+        <strong>DesignBridge</strong>
+        <span>蓝湖设计稿抓取</span>
+      </div>
+    </header>
+
+    <main>
+      <div class="design-summary">
+        <span class="status-dot" aria-hidden="true"></span>
+        <div>
+          <strong id="design-name">正在读取当前页面</strong>
+          <span id="design-id">请保持 DesignBridge 客户端开启</span>
+        </div>
+      </div>
+
+      <p id="status" role="status" aria-live="polite"></p>
+
+      <button id="capture-button" type="button" disabled>
+        <span class="capture-icon" aria-hidden="true"></span>
+        <span>抓取当前设计稿</span>
+      </button>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

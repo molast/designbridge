@@ -32,6 +32,17 @@
               placeholder="粘贴蓝湖设计稿链接"
               required
             />
+            <div class="capture-method" role="radiogroup" aria-label="抓取方式">
+              <button class="is-active" data-capture-method="browser" type="button" role="radio" aria-checked="true">
+                <span>浏览器插件</span>
+                <small class="browser-connection-state is-checking" id="browser-connection-state" aria-live="polite">
+                  检测中
+                </small>
+              </button>
+              <button data-capture-method="webview" type="button" role="radio" aria-checked="false">
+                内置浏览器
+              </button>
+            </div>
             <button class="primary-button" id="capture-button" type="submit">开始抓取</button>
             <button class="secondary-button hidden" id="cancel-button" type="button">取消</button>
           </div>
@@ -39,6 +50,9 @@
         </form>
 
         <div class="topbar-actions">
+          <button class="secondary-button plugin-install-button" id="install-browser-extension-button" type="button">
+            安装浏览器扩展
+          </button>
           <button class="secondary-button plugin-install-button" id="install-plugin-button" type="button">
             安装 Codex 插件
           </button>
@@ -51,7 +65,7 @@
               <div class="progress-bar" id="progress-bar"></div>
             </div>
           </div>
-          <div class="app-status" id="app-status">
+          <div class="app-status success" id="app-status">
             <span class="status-dot"></span>
             <span>就绪</span>
           </div>
@@ -138,6 +152,49 @@
         <div class="confirm-dialog-actions">
           <button class="secondary-button" id="delete-cancel-button" type="button">取消</button>
           <button class="danger-button" id="delete-confirm-button" type="button">删除</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog
+      class="confirm-dialog browser-extension-dialog"
+      id="browser-extension-dialog"
+      aria-labelledby="browser-extension-title"
+      tabindex="-1"
+    >
+      <div class="confirm-dialog-content">
+        <h2 id="browser-extension-title">还需在浏览器中确认</h2>
+        <p>客户端侧已经安装完成。浏览器要求你亲自在扩展管理页确认加载，DesignBridge 无法跳过这一步。</p>
+        <ol class="browser-extension-steps">
+          <li>选择你使用的浏览器，点击“打开扩展管理页”。</li>
+          <li>首次安装请开启“开发者模式”并加载扩展目录；客户端更新扩展后，点击扩展卡片上的“重新加载”。</li>
+          <li>选择下面的扩展目录，并在浏览器的目录选择窗口中确认。</li>
+          <li>保持 DesignBridge 客户端开启，在客户端粘贴蓝湖链接并点击“开始抓取”。</li>
+        </ol>
+        <div class="browser-extension-browser-row">
+          <label for="browser-extension-browser">安装到</label>
+          <select id="browser-extension-browser">
+            <option value="chrome">Google Chrome</option>
+            <option value="edge">Microsoft Edge</option>
+            <option value="brave">Brave</option>
+            <option value="chromium">Chromium</option>
+          </select>
+          <button class="primary-button" id="open-browser-extension-manager-button" type="button">打开扩展管理页</button>
+        </div>
+        <p class="confirm-dialog-error hidden" id="browser-extension-error" role="alert"></p>
+        <dl class="browser-extension-summary">
+          <div>
+            <dt>扩展目录</dt>
+            <dd id="browser-extension-path"></dd>
+          </div>
+          <div>
+            <dt>通信配置</dt>
+            <dd id="browser-extension-browsers"></dd>
+          </div>
+        </dl>
+        <div class="confirm-dialog-actions">
+          <button class="secondary-button" id="open-browser-extension-folder-button" type="button">打开扩展目录</button>
+          <button class="primary-button" id="browser-extension-done-button" type="button">完成</button>
         </div>
       </div>
     </dialog>

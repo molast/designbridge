@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "DesignBridge for Lanhu",
+  "version": "0.3.2",
+  "description": "Capture the current Lanhu design with the local DesignBridge app.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArlYYvuaF+fjGyVE0eDRX2Zr0NgEJqQQwtSpNORuAfe7HSk8an9HDvlo/GufpWLlks/NoSthNanB1lZ/AQGawCoWh7Y0Z/lLT+oxx5JPfvA6WawMNY3cSQZlmabwWvDT1kTGD/A/19ysVCyoAxUBb06UzmMEhrHoX4VO2hiNsBlZ4wT+Q4bRca1CEo+yqZlYkXzh7ZUgapfZZBUr9R3ix5L9ZVH1zu+rnxFI7jOG4acsSAaODiry2x4v72VZCkGcPc9F2PQzjxneNou9TOTPyiIepWeqMgoZvOTiNyMARw+HAE8+MTwoDP1b6/fhgdXS4fDygmh7Cg0J8x7ItX08MSwIDAQAB",
+  "permissions": [
+    "activeTab",
+    "cookies",
+    "nativeMessaging",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://lanhuapp.com/*",
+    "https://*.lanhuapp.com/*",
+    "https://lanhu.com/*",
+    "https://*.lanhu.com/*"
+  ],
+  "action": {
+    "default_title": "DesignBridge",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://lanhuapp.com/*",
+        "https://*.lanhuapp.com/*",
+        "https://lanhu.com/*",
+        "https://*.lanhu.com/*"
+      ],
+      "js": ["capture-page.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

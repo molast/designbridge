@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { mountPhotoPreview, showPhotoPreview, type PreviewItem } from "./photo-preview";
 import {
   mountPlatformPicker,
@@ -9,7 +10,12 @@ import {
 } from "./platform-picker";
 import { mountSliceExportPanel, showSliceExportPanel } from "./slice-export-panel";
 import { mountSidebarToggle } from "./sidebar-toggle";
-import { mountMcpLinkButton, showMcpLinkButton, type McpLinkTarget } from "./mcp-link-button";
+import {
+  mountMcpLinkButton,
+  showMcpLinkButton,
+  showMcpRefreshState,
+  type McpLinkTarget,
+} from "./mcp-link-button";
 
 type CaptureProgress = {
   captureId: string;
@@ -22,6 +28,35 @@ type CaptureFailure = {
   captureId: string;
   message: string;
 };
+
+type BrowserCaptureRequested = {
+  captureId: string;
+  sourceUrl: string;
+};
+
+type BrowserExtensionInstallResult = {
+  extensionPath: string;
+  extensionId: string;
+  configuredBrowsers: string[];
+};
+
+type BrowserExtensionStatus = {
+  browser: string;
+  installed: boolean;
+  enabled: boolean;
+  autoCaptureReady: boolean;
+  nativeHostInstalled: boolean;
+  connected: boolean;
+  versionCurrent: boolean;
+  extensionVersion: string | null;
+};
+
+type BrowserExtensionHeartbeat = {
+  browser: string;
+  extensionVersion: string;
+};
+
+type CaptureMethod = "browser" | "webview";
 
 type DesignCommentReply = {
   id: string;
@@ -210,12 +245,15 @@ const captureForm = document.querySelector<HTMLFormElement>("#capture-form")!;
 const urlInput = document.querySelector<HTMLInputElement>("#lanhu-url")!;
 const captureButton = document.querySelector<HTMLButtonElement>("#capture-button")!;
 const cancelButton = document.querySelector<HTMLButtonElement>("#cancel-button")!;
+const captureMethodButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-capture-method]")];
+const browserConnectionState = document.querySelector<HTMLElement>("#browser-connection-state")!;
 const fieldError = document.querySelector<HTMLElement>("#field-error")!;
 const progressPanel = document.querySelector<HTMLElement>("#progress-panel")!;
 const progressMessage = document.querySelector<HTMLElement>("#progress-message")!;
 const progressValue = document.querySelector<HTMLElement>("#progress-value")!;
 const progressBar = document.querySelector<HTMLElement>("#progress-bar")!;
 const appStatus = document.querySelector<HTMLElement>("#app-status")!;
+const installBrowserExtensionButton = document.querySelector<HTMLButtonElement>("#install-browser-extension-button")!;
 const installPluginButton = document.querySelector<HTMLButtonElement>("#install-plugin-button")!;
 const historyCount = document.querySelector<HTMLElement>("#history-count")!;
 const historyList = document.querySelector<HTMLElement>("#history-list")!;
@@ -248,6 +286,14 @@ const deleteConfirmMessage = document.querySelector<HTMLElement>("#delete-confir
 const deleteConfirmError = document.querySelector<HTMLElement>("#delete-confirm-error")!;
 const deleteCancelButton = document.querySelector<HTMLButtonElement>("#delete-cancel-button")!;
 const deleteConfirmButton = document.querySelector<HTMLButtonElement>("#delete-confirm-button")!;
+const browserExtensionDialog = document.querySelector<HTMLDialogElement>("#browser-extension-dialog")!;
+const browserExtensionPath = document.querySelector<HTMLElement>("#browser-extension-path")!;
+const browserExtensionBrowsers = document.querySelector<HTMLElement>("#browser-extension-browsers")!;
+const browserExtensionBrowser = document.querySelector<HTMLSelectElement>("#browser-extension-browser")!;
+const openBrowserExtensionManagerButton = document.querySelector<HTMLButtonElement>("#open-browser-extension-manager-button")!;
+const openBrowserExtensionFolderButton = document.querySelector<HTMLButtonElement>("#open-browser-extension-folder-button")!;
+const browserExtensionDoneButton = document.querySelector<HTMLButtonElement>("#browser-extension-done-button")!;
+const browserExtensionError = document.querySelector<HTMLElement>("#browser-extension-error")!;
 const previewRoot = document.querySelector<HTMLElement>("#preview-root")!;
 
 const CURRENT_CAPTURE_VERSION = 4;
@@ -276,6 +322,7 @@ let selectedHistoryKey: string | null = null;
 let pendingDeleteCaptureId: string | null = null;
 let inspectorFitFrame = 0;
 let sidebarResizeState: { pointerId: number; startX: number; width: number } | null = null;
+let installedBrowserExtensionPath: string | null = null;
 
 const MIN_CANVAS_ZOOM = 4;
 const MAX_CANVAS_ZOOM = 400;
@@ -287,18 +334,38 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = "designbridge.sidebar.collapsed";
 const CAPTURE_ATTEMPTS_STORAGE_KEY = "designbridge.capture.attempts";
 const HISTORY_SELECTED_KEY_STORAGE_KEY = "designbridge.history.selected-key";
 const HISTORY_SCROLL_TOP_STORAGE_KEY = "designbridge.history.scroll-top";
+const CAPTURE_METHOD_STORAGE_KEY = "designbridge.capture.method";
+const BROWSER_STORAGE_KEY = "designbridge.browser";
 let sidebarWidth = storedNumber(SIDEBAR_WIDTH_STORAGE_KEY, MIN_SIDEBAR_WIDTH);
 let sidebarCollapsed = storedValue(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true";
+let captureMethod: CaptureMethod = storedValue(CAPTURE_METHOD_STORAGE_KEY) === "webview" ? "webview" : "browser";
 
 mountPhotoPreview(previewRoot);
 mountPlatformPicker(platformPickerRoot, changeTargetPlatform);
 mountSliceExportPanel(sliceExportRoot);
-mountMcpLinkButton(mcpLinkRoot);
+mountMcpLinkButton(mcpLinkRoot, refreshSelectedDesign);
 mountSidebarToggle(sidebarToggleRoot, {
   collapsed: sidebarCollapsed,
   onChange: setSidebarCollapsed,
 });
 applySidebarState();
+
+const storedBrowser = storedValue(BROWSER_STORAGE_KEY);
+if (["chrome", "edge", "brave", "chromium"].includes(storedBrowser || "")) {
+  browserExtensionBrowser.value = storedBrowser!;
+}
+
+function setCaptureMethod(method: CaptureMethod, persist = true) {
+  captureMethod = method;
+  captureMethodButtons.forEach((button) => {
+    const active = button.dataset.captureMethod === method;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  if (persist) storeValue(CAPTURE_METHOD_STORAGE_KEY, method);
+}
+
+setCaptureMethod(captureMethod, false);
 
 function storedValue(key: string): string | null {
   try {
@@ -665,7 +732,9 @@ function showPreview(key: string) {
 
 function setStatus(label: string, tone: "idle" | "working" | "success" | "error" = "idle") {
   appStatus.className = `app-status ${tone}`;
-  appStatus.querySelector("span:last-child")!.textContent = label;
+  const statusLabel = appStatus.querySelector<HTMLElement>("span:last-child")!;
+  statusLabel.textContent = label;
+  appStatus.title = label;
 }
 
 async function installCodexPlugin() {
@@ -685,6 +754,148 @@ async function installCodexPlugin() {
   } finally {
     installPluginButton.disabled = false;
   }
+}
+
+async function openInstalledBrowserExtension() {
+  if (!installedBrowserExtensionPath) return;
+  try {
+    await openPath(installedBrowserExtensionPath);
+  } catch (error) {
+    setStatus("无法自动打开扩展目录", "error");
+    showError(`扩展已经安装，但无法打开目录：${String(error)}`);
+  }
+}
+
+async function openBrowserExtensionManager() {
+  openBrowserExtensionManagerButton.disabled = true;
+  openBrowserExtensionManagerButton.textContent = "正在打开…";
+  browserExtensionError.textContent = "";
+  browserExtensionError.classList.add("hidden");
+  try {
+    await invoke("open_browser_extension_manager", { browser: browserExtensionBrowser.value });
+    openBrowserExtensionManagerButton.textContent = "扩展管理页已打开";
+    setStatus("请在浏览器中点击“加载已解压的扩展程序”", "working");
+  } catch (error) {
+    openBrowserExtensionManagerButton.textContent = "重新打开";
+    browserExtensionError.textContent = String(error);
+    browserExtensionError.classList.remove("hidden");
+  } finally {
+    openBrowserExtensionManagerButton.disabled = false;
+  }
+}
+
+async function installBrowserExtension() {
+  installBrowserExtensionButton.disabled = true;
+  installBrowserExtensionButton.textContent = "正在准备…";
+  setStatus("正在准备浏览器扩展", "working");
+  clearError();
+
+  try {
+    const result = await invoke<BrowserExtensionInstallResult>("install_browser_extension");
+    installedBrowserExtensionPath = result.extensionPath;
+    browserExtensionPath.textContent = result.extensionPath;
+    browserExtensionBrowsers.textContent = result.configuredBrowsers.length
+      ? result.configuredBrowsers.join("、")
+      : "Chrome / Edge / Chromium";
+    browserExtensionError.textContent = "";
+    browserExtensionError.classList.add("hidden");
+    openBrowserExtensionManagerButton.textContent = "打开扩展管理页";
+    browserExtensionDialog.showModal();
+    browserExtensionDialog.focus({ preventScroll: true });
+    installBrowserExtensionButton.textContent = "浏览器扩展已准备";
+    setStatus("请在浏览器中确认加载扩展", "working");
+  } catch (error) {
+    installBrowserExtensionButton.textContent = "安装失败，重试";
+    setStatus("浏览器扩展安装失败", "error");
+    showError(String(error));
+  } finally {
+    installBrowserExtensionButton.disabled = false;
+  }
+}
+
+function browserExtensionReady(status: BrowserExtensionStatus): boolean {
+  return status.installed
+    && status.enabled
+    && status.autoCaptureReady
+    && status.nativeHostInstalled
+    && status.connected
+    && status.versionCurrent;
+}
+
+function renderBrowserExtensionStatus(status: BrowserExtensionStatus | null) {
+  const methodButton = captureMethodButtons.find((button) => button.dataset.captureMethod === "browser");
+  const ready = status ? browserExtensionReady(status) : false;
+  methodButton?.classList.toggle("is-available", ready);
+  methodButton?.classList.toggle("is-unavailable", Boolean(status) && !ready);
+  browserConnectionState.classList.toggle("is-checking", !status);
+  browserConnectionState.classList.toggle("is-connected", ready);
+  browserConnectionState.classList.toggle("is-disconnected", Boolean(status) && !ready);
+  browserConnectionState.textContent = !status ? "检测中" : ready ? "已连接" : "未连接";
+
+  if (!methodButton) return;
+  methodButton.title = !status
+    ? "正在检测浏览器扩展连接"
+    : ready
+      ? `${status.browser}：扩展 ${status.extensionVersion} 已连接当前客户端`
+      : status.connected && !status.versionCurrent
+        ? `${status.browser}：扩展版本 ${status.extensionVersion || "未知"}，需要更新并重新加载`
+        : status.installed
+          ? `${status.browser}：扩展未连接当前客户端`
+          : `${status.browser}：未检测到 DesignBridge 扩展`;
+}
+
+function browserExtensionUnavailableMessage(status: BrowserExtensionStatus): string {
+  if (status.connected && !status.versionCurrent) {
+    return `${status.browser} 中仍是旧版 DesignBridge 扩展（${status.extensionVersion || "版本未知"}），请重新安装并在扩展管理页点击“重新加载”`;
+  }
+  if (!status.nativeHostInstalled) {
+    return "浏览器通信程序尚未安装，请重新点击“安装浏览器扩展”";
+  }
+  if (status.installed && !status.enabled) {
+    return `${status.browser} 中的 DesignBridge 扩展未启用，请先在扩展管理页启用`;
+  }
+  if (status.installed && status.enabled && !status.autoCaptureReady) {
+    return `${status.browser} 中仍是旧版 DesignBridge 扩展，请在扩展管理页点击“重新加载”`;
+  }
+  if (status.installed) {
+    return `${status.browser} 中的 DesignBridge 扩展未连接当前客户端，请确认浏览器正在运行并重新加载扩展`;
+  }
+  return `未检测到 ${status.browser} 中的 DesignBridge 扩展，请先点击“安装浏览器扩展”`;
+}
+
+async function refreshBrowserExtensionStatus(announce = false): Promise<BrowserExtensionStatus> {
+  const status = await invoke<BrowserExtensionStatus>("browser_extension_status", {
+    browser: browserExtensionBrowser.value,
+  });
+  const ready = browserExtensionReady(status);
+  renderBrowserExtensionStatus(status);
+  if (["浏览器扩展已准备", "安装失败，重试"].includes(installBrowserExtensionButton.textContent || "")) {
+    installBrowserExtensionButton.textContent = "安装浏览器扩展";
+  }
+
+  if (announce) {
+    const label = ready ? `${status.browser} 扩展已连接` : "浏览器扩展未连接";
+    setStatus(label, ready ? "success" : "error");
+  }
+  return status;
+}
+
+function reportBrowserExtensionStatus() {
+  renderBrowserExtensionStatus(null);
+  void refreshBrowserExtensionStatus(true).catch((error) => {
+    renderBrowserExtensionStatus({
+      browser: browserExtensionBrowser.selectedOptions[0]?.textContent || "当前浏览器",
+      installed: false,
+      enabled: false,
+      autoCaptureReady: false,
+      nativeHostInstalled: false,
+      connected: false,
+      versionCurrent: false,
+      extensionVersion: null,
+    });
+    setStatus("无法检测浏览器插件", "error");
+    showError(String(error));
+  });
 }
 
 function showError(message: string) {
@@ -729,15 +940,78 @@ function markAttemptFailed(key: string, message: string) {
   else renderHistory();
 }
 
+function failCaptureAttempt(key: string, message: string) {
+  const retainedCapture = history.find((capture) => captureSourceKey(capture.sourceUrl) === key);
+  const wasReplacing = replacementCaptureIds.delete(key);
+  if (!wasReplacing || !retainedCapture) {
+    markAttemptFailed(key, message);
+    return;
+  }
+
+  captureAttempts = captureAttempts.filter((attempt) => attempt.key !== key);
+  persistCaptureAttempts();
+  if (selectedHistoryKey === key) renderCapture(retainedCapture);
+  else renderHistory();
+}
+
 function setCapturing(capturing: boolean) {
   captureButton.disabled = capturing;
   captureButton.textContent = capturing ? "抓取中…" : "开始抓取";
   cancelButton.classList.toggle("hidden", !capturing);
   urlInput.disabled = capturing;
+  captureMethodButtons.forEach((button) => {
+    button.disabled = capturing;
+  });
+  showMcpRefreshState(capturing && selectedCapture != null && activeCaptureKey === selectedHistoryKey);
   if (!capturing) {
     activeCaptureId = null;
     activeCaptureKey = null;
   }
+}
+
+function beginBrowserCapture(request: BrowserCaptureRequested) {
+  clearError();
+  setCaptureMethod("browser");
+  const key = captureSourceKey(request.sourceUrl);
+  const existingCapture = history.find((capture) => captureSourceKey(capture.sourceUrl) === key);
+  if (existingCapture) replacementCaptureIds.set(key, existingCapture.captureId);
+
+  let attempt = captureAttempts.find((item) => item.key === key);
+  if (!attempt) {
+    attempt = {
+      key,
+      sourceUrl: request.sourceUrl,
+      captureId: request.captureId,
+      status: "capturing",
+      message: "已从浏览器接收设计稿，Rust 正在读取数据…",
+      percent: 18,
+      updatedAt: Date.now(),
+    };
+    captureAttempts.push(attempt);
+  } else {
+    attempt.sourceUrl = request.sourceUrl;
+    attempt.captureId = request.captureId;
+    attempt.status = "capturing";
+    attempt.message = "已从浏览器接收设计稿，Rust 正在读取数据…";
+    attempt.percent = 18;
+    attempt.updatedAt = Date.now();
+  }
+
+  persistCaptureAttempts();
+  activeCaptureId = request.captureId;
+  activeCaptureKey = key;
+  urlInput.value = request.sourceUrl;
+  if (existingCapture) renderCapture(existingCapture);
+  else renderCaptureAttempt(attempt);
+  scrollHistoryEntryIntoView(key);
+  setCapturing(true);
+  setStatus("浏览器扩展抓取中", "working");
+  setProgress({
+    captureId: request.captureId,
+    stage: "authorize",
+    message: attempt.message,
+    percent: attempt.percent,
+  });
 }
 
 function dedupeHistory(captures: CaptureResult[]): CaptureResult[] {
@@ -1584,7 +1858,16 @@ async function confirmCaptureDeletion() {
   }
 }
 
-async function startCapture(sourceUrl = urlInput.value.trim()) {
+type StartCaptureOptions = {
+  force?: boolean;
+};
+
+function refreshSelectedDesign() {
+  if (!selectedCapture) return;
+  void startCapture(selectedCapture.sourceUrl, { force: true });
+}
+
+async function startCapture(sourceUrl = urlInput.value.trim(), options: StartCaptureOptions = {}) {
   clearError();
   let parsed: URL;
   try {
@@ -1609,7 +1892,7 @@ async function startCapture(sourceUrl = urlInput.value.trim()) {
   }
 
   const existingCapture = history.find((capture) => captureSourceKey(capture.sourceUrl) === key);
-  if (existingCapture && (existingCapture.dataVersion ?? 0) >= CURRENT_CAPTURE_VERSION) {
+  if (!options.force && existingCapture && (existingCapture.dataVersion ?? 0) >= CURRENT_CAPTURE_VERSION) {
     if (selectedCapture?.captureId !== existingCapture.captureId) renderCapture(existingCapture);
     else {
       setSelectedHistoryKey(key);
@@ -1621,6 +1904,23 @@ async function startCapture(sourceUrl = urlInput.value.trim()) {
     return;
   }
   if (existingCapture) replacementCaptureIds.set(key, existingCapture.captureId);
+
+  if (captureMethod === "browser") {
+    try {
+      const extensionStatus = await refreshBrowserExtensionStatus();
+      if (!browserExtensionReady(extensionStatus)) {
+        replacementCaptureIds.delete(key);
+        setStatus("浏览器扩展未连接", "error");
+        showError(browserExtensionUnavailableMessage(extensionStatus));
+        return;
+      }
+    } catch (error) {
+      replacementCaptureIds.delete(key);
+      setStatus("无法检测浏览器扩展", "error");
+      showError(String(error));
+      return;
+    }
+  }
 
   const existingAttempt = captureAttempts.find((attempt) => attempt.key === key);
   if (existingAttempt?.status === "capturing") {
@@ -1635,34 +1935,51 @@ async function startCapture(sourceUrl = urlInput.value.trim()) {
     sourceUrl: normalizedUrl,
     captureId: null,
     status: "capturing",
-    message: "正在打开蓝湖窗口…",
+    message: captureMethod === "browser" ? "正在打开系统浏览器…" : "正在打开蓝湖窗口…",
     percent: 4,
     updatedAt: Date.now(),
   };
   attempt.sourceUrl = normalizedUrl;
   attempt.captureId = null;
   attempt.status = "capturing";
-  attempt.message = existingCapture ? "正在更新旧版图层数据…" : "正在打开蓝湖窗口…";
+  attempt.message = options.force
+    ? captureMethod === "browser" ? "正在通过浏览器扩展刷新设计稿…" : "正在强制刷新设计稿…"
+    : existingCapture
+      ? "正在更新旧版图层数据…"
+      : captureMethod === "browser" ? "正在打开系统浏览器…" : "正在打开蓝湖窗口…";
   attempt.percent = 4;
   attempt.updatedAt = Date.now();
   if (!existingAttempt) captureAttempts.push(attempt);
   persistCaptureAttempts();
   activeCaptureKey = key;
-  renderCaptureAttempt(attempt);
+  if (existingCapture) renderCapture(existingCapture);
+  else renderCaptureAttempt(attempt);
   scrollHistoryEntryIntoView(key);
 
   setCapturing(true);
-  setStatus(existingCapture ? "正在更新图层数据" : "等待蓝湖授权", "working");
+  setStatus(
+    options.force
+      ? "正在刷新设计稿"
+      : existingCapture
+        ? "正在更新图层数据"
+        : captureMethod === "browser" ? "等待浏览器扩展" : "等待蓝湖授权",
+    "working",
+  );
   setProgress({ captureId: "", stage: "authorize", message: attempt.message, percent: 4 });
 
   try {
-    const captureId = await invoke<string>("start_lanhu_capture", { url: normalizedUrl });
+    const captureId = captureMethod === "browser"
+      ? await invoke<string>("start_browser_extension_capture", {
+          url: normalizedUrl,
+          browser: browserExtensionBrowser.value,
+        })
+      : await invoke<string>("start_lanhu_capture", { url: normalizedUrl });
     if (attempt.status !== "capturing" || activeCaptureKey !== key) return;
     activeCaptureId = captureId;
     attempt.captureId = captureId;
     persistCaptureAttempts();
   } catch (error) {
-    markAttemptFailed(key, String(error));
+    failCaptureAttempt(key, String(error));
     setCapturing(false);
     setStatus("抓取失败", "error");
     showError(String(error));
@@ -1676,6 +1993,30 @@ captureForm.addEventListener("submit", (event) => {
 });
 
 installPluginButton.addEventListener("click", () => void installCodexPlugin());
+installBrowserExtensionButton.addEventListener("click", () => void installBrowserExtension());
+captureMethodButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const method = button.dataset.captureMethod === "webview" ? "webview" : "browser";
+    setCaptureMethod(method);
+    clearError();
+    if (method === "browser") reportBrowserExtensionStatus();
+    else setStatus("将使用内置窗口抓取", "idle");
+  });
+});
+browserExtensionBrowser.addEventListener("change", () => {
+  storeValue(BROWSER_STORAGE_KEY, browserExtensionBrowser.value);
+  if (captureMethod === "browser") reportBrowserExtensionStatus();
+});
+openBrowserExtensionManagerButton.addEventListener("click", () => void openBrowserExtensionManager());
+openBrowserExtensionFolderButton.addEventListener("click", () => void openInstalledBrowserExtension());
+browserExtensionDoneButton.addEventListener("click", () => {
+  browserExtensionDialog.close();
+  reportBrowserExtensionStatus();
+});
+browserExtensionDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  browserExtensionDialog.close();
+});
 
 cancelButton.addEventListener("click", async () => {
   if (!activeCaptureId || !activeCaptureKey) return;
@@ -1684,7 +2025,7 @@ cancelButton.addEventListener("click", async () => {
   try {
     await invoke("cancel_lanhu_capture", { captureId });
   } finally {
-    markAttemptFailed(captureKey, "抓取已取消，可重试");
+    failCaptureAttempt(captureKey, "抓取已取消，可重试");
     setCapturing(false);
     progressPanel.classList.add("hidden");
     setStatus("已取消");
@@ -1898,7 +2239,8 @@ document.addEventListener("pointerdown", (event) => {
     artboardImage.contains(target) ||
     commentMarkers.contains(target) ||
     commentPopover.contains(target) ||
-    inspectorDetails.contains(target)
+    inspectorDetails.contains(target) ||
+    mcpLinkRoot.contains(target)
   ) return;
   clearLayerSelection();
 });
@@ -1911,13 +2253,33 @@ window.addEventListener("resize", () => {
 window.addEventListener("scroll", scheduleInspectorFit, { passive: true });
 
 async function initialize() {
+  await listen<BrowserExtensionHeartbeat>("browser-extension-heartbeat", ({ payload }) => {
+    if (payload.browser !== browserExtensionBrowser.value) return;
+    void refreshBrowserExtensionStatus().catch((error) => {
+      console.warn("浏览器插件心跳状态更新失败", error);
+    });
+  });
+
+  await listen<BrowserCaptureRequested>("browser-capture-requested", ({ payload }) => {
+    beginBrowserCapture(payload);
+  });
+
   await listen<CaptureProgress>("capture-progress", ({ payload }) => {
     if (activeCaptureId && payload.captureId !== activeCaptureId) return;
     const attempt = updateAttemptProgress(payload);
-    if (!attempt) return;
+    const isSelectedSliceDownload =
+      payload.stage === "slices" && selectedCapture?.captureId === payload.captureId;
+    if (!attempt && !isSelectedSliceDownload) return;
     setProgress(payload);
     if (payload.stage !== "complete") {
-      setStatus(payload.stage === "download" ? "正在下载画板" : "等待蓝湖授权", "working");
+      const status = payload.stage === "download"
+        ? "正在下载画板"
+        : payload.stage === "parse"
+          ? "正在解析图层"
+          : payload.stage === "slices"
+            ? "正在下载切图"
+          : "正在读取蓝湖数据";
+      setStatus(status, "working");
     }
   });
 
@@ -1927,7 +2289,7 @@ async function initialize() {
       (item) => item.captureId === payload.captureId || item.key === activeCaptureKey,
     );
     if (!attempt) return;
-    markAttemptFailed(attempt.key, payload.message);
+    failCaptureAttempt(attempt.key, payload.message);
     setCapturing(false);
     setStatus("抓取失败", "error");
     showError(payload.message);
@@ -1942,13 +2304,18 @@ async function initialize() {
     captureAttempts = captureAttempts.filter((attempt) => attempt.key !== key);
     persistCaptureAttempts();
     setCapturing(false);
-    setStatus(slicesComplete(payload) ? "抓取完成" : "切图后台下载中", slicesComplete(payload) ? "success" : "working");
-    setProgress({
-      captureId: payload.captureId,
-      stage: "complete",
-      message: slicesComplete(payload) ? "设计稿和图层已就绪" : "设计稿和图层已就绪，切图正在后台下载",
-      percent: 100,
-    });
+    const complete = slicesComplete(payload);
+    setStatus(complete ? "抓取完成" : "切图后台下载中", complete ? "success" : "working");
+    if (complete) {
+      progressPanel.classList.add("hidden");
+    } else {
+      setProgress({
+        captureId: payload.captureId,
+        stage: "slices",
+        message: `正在下载切图 0/${sliceTotal(payload)}`,
+        percent: 0,
+      });
+    }
     history = dedupeHistory([payload, ...history.filter((item) => captureSourceKey(item.sourceUrl) !== key)]);
     renderCapture(payload);
     scrollHistoryEntryIntoView(key);
@@ -1961,6 +2328,11 @@ async function initialize() {
 
   await listen<CaptureResult>("capture-updated", ({ payload }) => {
     updateCapturedSlices(payload);
+    const isVisibleCapture =
+      selectedCapture?.captureId === payload.captureId &&
+      (!activeCaptureId || activeCaptureId === payload.captureId);
+    if (!isVisibleCapture) return;
+    progressPanel.classList.add("hidden");
     const tone = payload.sliceFailedCount ? "error" : "success";
     setStatus(payload.sliceFailedCount ? "部分切图失败" : "切图下载完成", tone);
   });
@@ -1968,6 +2340,21 @@ async function initialize() {
   const rememberedAttempt = captureAttempts.find((attempt) => attempt.key === selectedHistoryKey);
   if (rememberedAttempt) renderCaptureAttempt(rememberedAttempt);
   else renderHistory();
+
+  try {
+    await refreshBrowserExtensionStatus();
+  } catch (error) {
+    console.warn("浏览器插件状态检测失败", error);
+    renderBrowserExtensionStatus(null);
+  }
+
+  window.setInterval(() => {
+    if (captureMethod !== "browser") return;
+    void refreshBrowserExtensionStatus().catch((error) => {
+      console.warn("浏览器插件实时状态检测失败", error);
+      renderBrowserExtensionStatus(null);
+    });
+  }, 3000);
 
   try {
     history = dedupeHistory(await invoke<CaptureResult[]>("list_saved_captures"));

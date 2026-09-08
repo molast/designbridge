@@ -14,6 +14,7 @@
     "windows": [
       {
         "title": "DesignBridge",
+        "theme": "Light",
         "width": 1180,
         "height": 760,
         "minWidth": 900,

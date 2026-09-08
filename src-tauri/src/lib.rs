@@ -12,10 +12,19 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use url::{Host, Url};
+
+#[cfg(unix)]
+use std::{
+    io::{Read, Write},
+    os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    },
+};
 
 pub mod design_data;
 
@@ -23,6 +32,11 @@ use design_data::*;
 
 const TITLE_PREFIX: &str = "__DESIGNBRIDGE__";
 const MAX_IMAGE_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_BROWSER_MESSAGE_BYTES: usize = 256 * 1024;
+const BROWSER_EXTENSION_ID: &str = "gdpjdkhhfielmlddencemafipiebldcf";
+const BROWSER_NATIVE_HOST_NAME: &str = "com.designbridge.browser";
+const BROWSER_EXTENSION_VERSION: &str = "0.3.2";
+const BROWSER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(8);
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
@@ -34,9 +48,17 @@ struct CaptureRuntime {
 #[derive(Default)]
 struct CaptureRuntimeInner {
     active: HashSet<String>,
+    browser_started: HashSet<String>,
     cancelled: HashSet<String>,
     sources: HashMap<String, String>,
     chunks: HashMap<String, ChunkAccumulator>,
+    browser_heartbeats: HashMap<String, BrowserHeartbeat>,
+}
+
+#[derive(Clone, Debug)]
+struct BrowserHeartbeat {
+    received_at: Instant,
+    extension_version: String,
 }
 
 #[derive(Debug)]
@@ -102,6 +124,73 @@ struct CaptureProgress {
 struct CaptureFailure {
     capture_id: String,
     message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserCaptureRequested {
+    capture_id: String,
+    source_url: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserExtensionHeartbeat {
+    browser: String,
+    extension_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserCaptureRequest {
+    version: u8,
+    #[serde(rename = "type")]
+    request_type: String,
+    #[serde(default)]
+    capture_id: Option<String>,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    cookie: String,
+    #[serde(default)]
+    auth_token: String,
+    #[serde(default)]
+    browser: String,
+    #[serde(default)]
+    extension_version: String,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserCaptureResponse {
+    ok: bool,
+    capture_id: Option<String>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserExtensionInstallResult {
+    extension_path: String,
+    extension_id: String,
+    configured_browsers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserExtensionStatus {
+    browser: String,
+    installed: bool,
+    enabled: bool,
+    auto_capture_ready: bool,
+    native_host_installed: bool,
+    connected: bool,
+    version_current: bool,
+    extension_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -531,6 +620,369 @@ fn emit_failure(app: &tauri::AppHandle, capture_id: &str, message: impl Into<Str
     );
 }
 
+fn reserve_capture(
+    runtime: &CaptureRuntime,
+    capture_id: &str,
+    source_url: &str,
+) -> Result<(), String> {
+    let mut inner = runtime
+        .inner
+        .lock()
+        .map_err(|_| "抓取状态不可用".to_string())?;
+    if !inner.active.is_empty() {
+        return Err("已有设计稿正在抓取，请完成或取消后再试".to_string());
+    }
+    inner.cancelled.remove(capture_id);
+    inner.active.insert(capture_id.to_string());
+    inner
+        .sources
+        .insert(capture_id.to_string(), source_url.trim().to_string());
+    Ok(())
+}
+
+fn claim_browser_capture(
+    runtime: &CaptureRuntime,
+    capture_id: &str,
+    request_route: &LanhuRoute,
+) -> Result<String, String> {
+    if !valid_capture_id(capture_id) {
+        return Err("浏览器扩展返回了无效的抓取任务 ID".to_string());
+    }
+
+    let mut inner = runtime
+        .inner
+        .lock()
+        .map_err(|_| "抓取状态不可用".to_string())?;
+    if !inner.active.contains(capture_id) {
+        return Err("抓取任务已取消或已经超时，请在客户端重新开始".to_string());
+    }
+    if inner.browser_started.contains(capture_id) {
+        return Err("浏览器扩展已经提交过该抓取任务".to_string());
+    }
+
+    let source_url = inner
+        .sources
+        .get(capture_id)
+        .cloned()
+        .ok_or_else(|| "找不到浏览器抓取任务".to_string())?;
+    let source_route = lanhu_route(&lanhu_url(&source_url)?);
+    if source_route.project_id != request_route.project_id
+        || source_route.image_id != request_route.image_id
+    {
+        return Err("浏览器返回的设计稿与客户端请求不一致".to_string());
+    }
+
+    inner.browser_started.insert(capture_id.to_string());
+    Ok(source_url)
+}
+
+fn mark_browser_capture_started(runtime: &CaptureRuntime, capture_id: &str) -> Result<(), String> {
+    runtime
+        .inner
+        .lock()
+        .map_err(|_| "抓取状态不可用".to_string())?
+        .browser_started
+        .insert(capture_id.to_string());
+    Ok(())
+}
+
+fn expire_pending_browser_capture(runtime: &CaptureRuntime, capture_id: &str) -> bool {
+    let Ok(mut inner) = runtime.inner.lock() else {
+        return false;
+    };
+    if !inner.active.contains(capture_id) || inner.browser_started.contains(capture_id) {
+        return false;
+    }
+
+    inner.active.remove(capture_id);
+    inner.sources.remove(capture_id);
+    inner
+        .chunks
+        .retain(|key, _| !key.starts_with(&format!("{capture_id}:")));
+    true
+}
+
+#[cfg(unix)]
+fn read_browser_frame(stream: &mut impl Read) -> Result<Option<Vec<u8>>, String> {
+    let mut length = [0u8; 4];
+    match stream.read_exact(&mut length) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(format!("无法读取浏览器扩展消息长度：{error}")),
+    }
+    let length = u32::from_ne_bytes(length) as usize;
+    if length == 0 || length > MAX_BROWSER_MESSAGE_BYTES {
+        return Err("浏览器扩展消息大小无效".to_string());
+    }
+    let mut payload = vec![0u8; length];
+    stream
+        .read_exact(&mut payload)
+        .map_err(|error| format!("无法读取浏览器扩展消息：{error}"))?;
+    Ok(Some(payload))
+}
+
+#[cfg(unix)]
+fn write_browser_frame(stream: &mut impl Write, payload: &[u8]) -> Result<(), String> {
+    if payload.is_empty() || payload.len() > MAX_BROWSER_MESSAGE_BYTES {
+        return Err("浏览器扩展响应大小无效".to_string());
+    }
+    stream
+        .write_all(&(payload.len() as u32).to_ne_bytes())
+        .and_then(|_| stream.write_all(payload))
+        .and_then(|_| stream.flush())
+        .map_err(|error| format!("无法写入浏览器扩展响应：{error}"))
+}
+
+fn queue_browser_capture(
+    app: tauri::AppHandle,
+    request: BrowserCaptureRequest,
+) -> Result<String, String> {
+    if request.version != 1 || request.request_type != "capture" {
+        return Err("浏览器扩展协议版本不受支持".to_string());
+    }
+    if request.cookie.len() > 128 * 1024 || request.auth_token.len() > 16 * 1024 {
+        return Err("未读取到有效的蓝湖登录状态".to_string());
+    }
+    if request.cookie.is_empty() && request.auth_token.is_empty() {
+        return Err("未读取到有效的蓝湖登录状态".to_string());
+    }
+    if !request.cookie.is_empty() {
+        header::HeaderValue::from_str(&request.cookie)
+            .map_err(|_| "蓝湖登录状态格式无效".to_string())?;
+    }
+    if !request.auth_token.is_empty() {
+        lanhu_authorization_header(&request.auth_token)?;
+    }
+
+    let request_url = lanhu_url(&request.url)?;
+    let request_route = lanhu_route(&request_url);
+    if request_route.project_id.is_none() || request_route.image_id.is_none() {
+        return Err("请在浏览器中打开具体的蓝湖设计稿页面".to_string());
+    }
+
+    let runtime = app.state::<CaptureRuntime>();
+    let (capture_id, source_url) = if let Some(requested_id) = request.capture_id.as_deref() {
+        let source_url = claim_browser_capture(&runtime, requested_id, &request_route)?;
+        (requested_id.to_string(), source_url)
+    } else {
+        let capture_id = capture_id();
+        let source_url = request.url.trim().to_string();
+        reserve_capture(&runtime, &capture_id, &source_url)?;
+        if let Err(error) = mark_browser_capture_started(&runtime, &capture_id) {
+            take_source(&runtime, &capture_id);
+            return Err(error);
+        }
+        (capture_id, source_url)
+    };
+    let route = lanhu_route(&lanhu_url(&source_url)?);
+    let _ = app.emit(
+        "browser-capture-requested",
+        BrowserCaptureRequested {
+            capture_id: capture_id.clone(),
+            source_url: source_url.clone(),
+        },
+    );
+    emit_progress(
+        &app,
+        &capture_id,
+        "authorize",
+        "已收到浏览器扩展请求，Rust 正在读取设计数据…",
+        18,
+    );
+
+    let task_app = app.clone();
+    let task_capture_id = capture_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = fetch_and_persist_browser_lanhu(
+            &task_app,
+            &task_capture_id,
+            &source_url,
+            &route,
+            &request.cookie,
+            &request.auth_token,
+        )
+        .await;
+        match result {
+            Ok(capture) => {
+                let _ = task_app.emit("capture-complete", capture);
+            }
+            Err(error) => {
+                take_source(&task_app.state::<CaptureRuntime>(), &task_capture_id);
+                emit_failure(&task_app, &task_capture_id, error);
+            }
+        }
+    });
+    Ok(capture_id)
+}
+
+fn record_browser_heartbeat(
+    app: &tauri::AppHandle,
+    request: &BrowserCaptureRequest,
+) -> Result<(), String> {
+    if request.version != 1 || request.request_type != "heartbeat" {
+        return Err("浏览器扩展协议版本不受支持".to_string());
+    }
+    browser_extension_manager_target(&request.browser)?;
+    if request.extension_version.is_empty()
+        || request.extension_version.len() > 32
+        || request.session_id.is_empty()
+        || request.session_id.len() > 80
+    {
+        return Err("浏览器扩展心跳信息无效".to_string());
+    }
+
+    app.state::<CaptureRuntime>()
+        .inner
+        .lock()
+        .map_err(|_| "浏览器扩展状态不可用".to_string())?
+        .browser_heartbeats
+        .insert(
+            request.browser.clone(),
+            BrowserHeartbeat {
+                received_at: Instant::now(),
+                extension_version: request.extension_version.clone(),
+            },
+        );
+    let _ = app.emit(
+        "browser-extension-heartbeat",
+        BrowserExtensionHeartbeat {
+            browser: request.browser.clone(),
+            extension_version: request.extension_version.clone(),
+        },
+    );
+    Ok(())
+}
+
+fn record_browser_capture_error(
+    app: &tauri::AppHandle,
+    request: &BrowserCaptureRequest,
+) -> Result<(), String> {
+    let capture_id = request
+        .capture_id
+        .as_deref()
+        .ok_or_else(|| "浏览器扩展未提供抓取任务 ID".to_string())?;
+    if !valid_capture_id(capture_id) || request.message.is_empty() || request.message.len() > 500 {
+        return Err("浏览器扩展错误信息无效".to_string());
+    }
+
+    let source_url = take_source(&app.state::<CaptureRuntime>(), capture_id)
+        .ok_or_else(|| "抓取任务已取消或已经超时".to_string())?;
+    let expected_route = lanhu_route(&lanhu_url(&source_url)?);
+    let request_route = lanhu_route(&lanhu_url(&request.url)?);
+    if expected_route.project_id != request_route.project_id
+        || expected_route.image_id != request_route.image_id
+    {
+        return Err("浏览器返回的设计稿与客户端请求不一致".to_string());
+    }
+
+    emit_failure(app, capture_id, &request.message);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn handle_browser_connection(app: tauri::AppHandle, mut stream: UnixStream) {
+    let response = match read_browser_frame(&mut stream) {
+        Ok(Some(payload)) => match serde_json::from_slice::<BrowserCaptureRequest>(&payload) {
+            Ok(request) if request.request_type == "capture" => {
+                match queue_browser_capture(app, request) {
+                    Ok(capture_id) => BrowserCaptureResponse {
+                        ok: true,
+                        capture_id: Some(capture_id),
+                        message: "已开始抓取当前蓝湖设计稿".to_string(),
+                    },
+                    Err(message) => BrowserCaptureResponse {
+                        ok: false,
+                        capture_id: None,
+                        message,
+                    },
+                }
+            }
+            Ok(request) if request.request_type == "heartbeat" => {
+                match record_browser_heartbeat(&app, &request) {
+                    Ok(()) => BrowserCaptureResponse {
+                        ok: true,
+                        capture_id: None,
+                        message: "DesignBridge 客户端已连接".to_string(),
+                    },
+                    Err(message) => BrowserCaptureResponse {
+                        ok: false,
+                        capture_id: None,
+                        message,
+                    },
+                }
+            }
+            Ok(request) if request.request_type == "captureError" => {
+                match record_browser_capture_error(&app, &request) {
+                    Ok(()) => BrowserCaptureResponse {
+                        ok: true,
+                        capture_id: request.capture_id,
+                        message: "抓取失败信息已发送到客户端".to_string(),
+                    },
+                    Err(message) => BrowserCaptureResponse {
+                        ok: false,
+                        capture_id: None,
+                        message,
+                    },
+                }
+            }
+            Ok(_) => BrowserCaptureResponse {
+                ok: false,
+                capture_id: None,
+                message: "浏览器扩展协议版本不受支持".to_string(),
+            },
+            Err(_) => BrowserCaptureResponse {
+                ok: false,
+                capture_id: None,
+                message: "无法解析浏览器扩展请求".to_string(),
+            },
+        },
+        Ok(None) => return,
+        Err(message) => BrowserCaptureResponse {
+            ok: false,
+            capture_id: None,
+            message,
+        },
+    };
+    if let Ok(payload) = serde_json::to_vec(&response) {
+        let _ = write_browser_frame(&mut stream, &payload);
+    }
+}
+
+#[cfg(unix)]
+fn start_browser_extension_listener(app: tauri::AppHandle) -> Result<(), String> {
+    let socket_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法确定应用数据目录：{error}"))?
+        .join("browser-extension.sock");
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建浏览器扩展数据目录：{error}"))?;
+    }
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)
+            .map_err(|error| format!("无法清理浏览器扩展通信文件：{error}"))?;
+    }
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|error| format!("无法启动浏览器扩展通信服务：{error}"))?;
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("无法设置浏览器扩展通信权限：{error}"))?;
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => handle_browser_connection(app.clone(), stream),
+                Err(error) => eprintln!("browser extension connection failed: {error}"),
+            }
+        }
+    });
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn start_browser_extension_listener(_app: tauri::AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
 fn collect_chunk(
     runtime: &CaptureRuntime,
     message: &TitleMessage<'_>,
@@ -579,6 +1031,7 @@ struct BridgeState {
 fn take_source(runtime: &CaptureRuntime, capture_id: &str) -> Option<String> {
     let mut inner = runtime.inner.lock().ok()?;
     inner.active.remove(capture_id);
+    inner.browser_started.remove(capture_id);
     inner
         .chunks
         .retain(|key, _| !key.starts_with(&format!("{capture_id}:")));
@@ -735,7 +1188,13 @@ fn cookie_header(window: &WebviewWindow, url: &Url) -> Result<Option<String>, St
     Ok((!value.is_empty()).then_some(value))
 }
 
-fn lanhu_http_client(cookie: &str) -> Result<Client, String> {
+fn lanhu_authorization_header(auth_token: &str) -> Result<header::HeaderValue, String> {
+    let encoded = BASE64.encode(format!("{}:", auth_token.trim()));
+    header::HeaderValue::from_str(&format!("Basic {encoded}"))
+        .map_err(|_| "蓝湖登录令牌格式无效".to_string())
+}
+
+fn lanhu_http_client(cookie: &str, auth_token: &str) -> Result<Client, String> {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::ACCEPT,
@@ -761,6 +1220,12 @@ fn lanhu_http_client(cookie: &str) -> Result<Client, String> {
         headers.insert(
             header::COOKIE,
             header::HeaderValue::from_str(cookie).map_err(|_| "蓝湖登录态格式无效".to_string())?,
+        );
+    }
+    if !auth_token.is_empty() {
+        headers.insert(
+            header::AUTHORIZATION,
+            lanhu_authorization_header(auth_token)?,
         );
     }
 
@@ -2022,15 +2487,15 @@ fn is_retryable_lanhu_error(error: &str) -> bool {
         || lower.contains("json")
 }
 
-async fn fetch_and_persist_lanhu(
+async fn fetch_lanhu_project(
     app: &tauri::AppHandle,
-    window: &WebviewWindow,
     capture_id: &str,
     source_url: &str,
     route: &LanhuRoute,
     cookie: &str,
-) -> Result<CaptureResult, String> {
-    let client = lanhu_http_client(cookie)?;
+    auth_token: &str,
+) -> Result<LanhuProjectPayload, String> {
+    let client = lanhu_http_client(cookie, auth_token)?;
     let endpoint = api_url(route)?;
     let response = request_lanhu_json(&client, endpoint).await?;
     let mut project = project_from_response(&response, route, source_url)?;
@@ -2052,7 +2517,7 @@ async fn fetch_and_persist_lanhu(
         {
             client.clone()
         } else {
-            lanhu_http_client("")?
+            lanhu_http_client("", "")?
         };
         let design_json = request_lanhu_json(&json_client, json_url).await?;
         if let (Some(design), Some(coordinate_space)) = (
@@ -2089,9 +2554,36 @@ async fn fetch_and_persist_lanhu(
         );
     }
 
-    let runtime = app.state::<CaptureRuntime>();
-    let source = take_source(&runtime, capture_id).unwrap_or_else(|| source_url.to_string());
+    Ok(project)
+}
+
+async fn fetch_and_persist_lanhu(
+    app: &tauri::AppHandle,
+    window: &WebviewWindow,
+    capture_id: &str,
+    source_url: &str,
+    route: &LanhuRoute,
+    cookie: &str,
+) -> Result<CaptureResult, String> {
+    let project = fetch_lanhu_project(app, capture_id, source_url, route, cookie, "").await?;
+    let source = take_source(&app.state::<CaptureRuntime>(), capture_id)
+        .unwrap_or_else(|| source_url.to_string());
     let _ = window.close();
+    persist_project(app, capture_id, &source, project).await
+}
+
+async fn fetch_and_persist_browser_lanhu(
+    app: &tauri::AppHandle,
+    capture_id: &str,
+    source_url: &str,
+    route: &LanhuRoute,
+    cookie: &str,
+    auth_token: &str,
+) -> Result<CaptureResult, String> {
+    let project =
+        fetch_lanhu_project(app, capture_id, source_url, route, cookie, auth_token).await?;
+    let source = take_source(&app.state::<CaptureRuntime>(), capture_id)
+        .unwrap_or_else(|| source_url.to_string());
     persist_project(app, capture_id, &source, project).await
 }
 
@@ -2463,6 +2955,18 @@ async fn download_slices_in_background(
         {
             slices.push(captured);
         }
+        let completed = index + 1;
+        let percent = completed
+            .checked_mul(100)
+            .and_then(|value| value.checked_div(total))
+            .map_or(100, |value| value as u8);
+        emit_progress(
+            &app,
+            &result.capture_id,
+            "slices",
+            &format!("正在下载切图 {completed}/{total}"),
+            percent,
+        );
     }
 
     result.slice_downloaded_count = slices
@@ -2583,12 +3087,17 @@ async fn persist_project(
 
     write_capture_metadata(app, capture_id, &output_dir, &result).await?;
 
-    let complete_message = if slice_total_count == 0 {
-        "设计稿和图层已就绪"
+    if slice_total_count == 0 {
+        emit_progress(app, capture_id, "complete", "设计稿和图层已就绪", 100);
     } else {
-        "设计稿和图层已就绪，切图正在后台下载"
-    };
-    emit_progress(app, capture_id, "complete", complete_message, 100);
+        emit_progress(
+            app,
+            capture_id,
+            "slices",
+            &format!("正在下载切图 0/{slice_total_count}"),
+            0,
+        );
+    }
     if slice_total_count > 0 {
         tauri::async_runtime::spawn(download_slices_in_background(
             app.clone(),
@@ -2611,17 +3120,7 @@ fn start_lanhu_capture(
     let capture_id = capture_id();
     let window_label = format!("lanhu-{capture_id}");
 
-    {
-        let mut inner = runtime
-            .inner
-            .lock()
-            .map_err(|_| "抓取状态不可用".to_string())?;
-        inner.cancelled.remove(&capture_id);
-        inner.active.insert(capture_id.clone());
-        inner
-            .sources
-            .insert(capture_id.clone(), url.trim().to_string());
-    }
+    reserve_capture(&runtime, &capture_id, url.trim())?;
 
     let app_for_title = app.clone();
     let capture_for_title = capture_id.clone();
@@ -2681,6 +3180,7 @@ fn cancel_lanhu_capture(
     capture_id: String,
 ) -> Result<(), String> {
     take_source(&runtime, &capture_id);
+    mark_capture_cancelled(&runtime, &capture_id);
     if let Some(window) = app.get_webview_window(&format!("lanhu-{capture_id}")) {
         window
             .close()
@@ -2929,6 +3429,511 @@ async fn delete_saved_capture(app: tauri::AppHandle, capture_id: String) -> Resu
     Err("抓取记录不存在".to_string())
 }
 
+fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(target)
+        .map_err(|error| format!("无法创建目录 {}：{error}", target.display()))?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| format!("无法读取目录 {}：{error}", source.display()))?
+    {
+        let entry = entry.map_err(|error| format!("无法读取扩展文件：{error}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("无法检查扩展文件：{error}"))?;
+        if file_type.is_dir() {
+            copy_directory(&source_path, &target_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &target_path).map_err(|error| {
+                format!(
+                    "无法复制扩展文件 {} 到 {}：{error}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn build_debug_browser_host(project_root: &Path, debug_host: &Path) -> Result<(), String> {
+    let output = Command::new("cargo")
+        .arg("build")
+        .arg("--manifest-path")
+        .arg(project_root.join("src-tauri/Cargo.toml"))
+        .arg("--bin")
+        .arg("designbridge-browser-host")
+        .current_dir(project_root)
+        .output()
+        .map_err(|error| format!("无法构建浏览器通信程序：{error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "无法构建浏览器通信程序".to_string()
+        } else {
+            detail
+        });
+    }
+    if !debug_host.is_file() {
+        return Err("浏览器通信程序构建完成但未找到运行文件".to_string());
+    }
+    Ok(())
+}
+
+fn browser_extension_sources(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "无法确定 DesignBridge 项目目录".to_string())?;
+    let resource_root = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("无法确定客户端资源目录：{error}"))?
+        .join("designbridge-installer");
+    let project_extension = project_root.join("browser-extension");
+    let bundled_extension = resource_root.join("browser-extension");
+    let extension_source =
+        if cfg!(debug_assertions) && project_extension.join("manifest.json").is_file() {
+            project_extension
+        } else if bundled_extension.join("manifest.json").is_file() {
+            bundled_extension
+        } else {
+            project_extension
+        };
+    if !extension_source.join("manifest.json").is_file() {
+        return Err("客户端中缺少浏览器扩展文件，请重新安装最新版客户端".to_string());
+    }
+
+    let debug_host = project_root
+        .join("src-tauri/target/debug")
+        .join(browser_host_binary_name());
+    if cfg!(debug_assertions) {
+        build_debug_browser_host(&project_root, &debug_host)?;
+        return Ok((extension_source, debug_host));
+    }
+
+    let bundled_host = resource_root
+        .join("browser-host/bin")
+        .join(browser_host_binary_name());
+    if bundled_host.is_file() {
+        return Ok((extension_source, bundled_host));
+    }
+
+    build_debug_browser_host(&project_root, &debug_host)?;
+    Ok((extension_source, debug_host))
+}
+
+fn browser_host_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "designbridge-browser-host.exe"
+    } else {
+        "designbridge-browser-host"
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn install_browser_native_manifests(host_path: &Path) -> Result<Vec<String>, String> {
+    let home = dirs::home_dir().ok_or_else(|| "无法确定当前用户目录".to_string())?;
+    #[cfg(target_os = "macos")]
+    let browser_roots = [
+        ("Google Chrome", "Library/Application Support/Google/Chrome"),
+        (
+            "Microsoft Edge",
+            "Library/Application Support/Microsoft Edge",
+        ),
+        (
+            "Brave",
+            "Library/Application Support/BraveSoftware/Brave-Browser",
+        ),
+        ("Chromium", "Library/Application Support/Chromium"),
+    ];
+    #[cfg(target_os = "linux")]
+    let browser_roots = [
+        ("Google Chrome", ".config/google-chrome"),
+        ("Microsoft Edge", ".config/microsoft-edge"),
+        ("Brave", ".config/BraveSoftware/Brave-Browser"),
+        ("Chromium", ".config/chromium"),
+    ];
+    let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+        "name": BROWSER_NATIVE_HOST_NAME,
+        "description": "DesignBridge browser extension native host",
+        "path": host_path.to_string_lossy(),
+        "type": "stdio",
+        "allowed_origins": [format!("chrome-extension://{BROWSER_EXTENSION_ID}/")],
+    }))
+    .map_err(|error| format!("无法生成浏览器通信配置：{error}"))?;
+    let mut configured = Vec::new();
+    for (browser, relative_root) in browser_roots {
+        let directory = home.join(relative_root).join("NativeMessagingHosts");
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| format!("无法创建 {browser} 配置目录：{error}"))?;
+        std::fs::write(
+            directory.join(format!("{BROWSER_NATIVE_HOST_NAME}.json")),
+            &manifest,
+        )
+        .map_err(|error| format!("无法写入 {browser} 通信配置：{error}"))?;
+        configured.push(browser.to_string());
+    }
+    Ok(configured)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn install_browser_native_manifests(_host_path: &Path) -> Result<Vec<String>, String> {
+    Err("当前版本的浏览器扩展安装仅支持 macOS 和 Linux".to_string())
+}
+
+#[tauri::command]
+fn install_browser_extension(
+    app: tauri::AppHandle,
+) -> Result<BrowserExtensionInstallResult, String> {
+    let (extension_source, host_source) = browser_extension_sources(&app)?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法确定应用数据目录：{error}"))?;
+    let extension_target = app_data.join("browser-extension");
+    let host_target = app_data
+        .join("browser-host")
+        .join(browser_host_binary_name());
+    if extension_target.exists() {
+        std::fs::remove_dir_all(&extension_target)
+            .map_err(|error| format!("无法更新旧版浏览器扩展：{error}"))?;
+    }
+    copy_directory(&extension_source, &extension_target)?;
+    if let Some(parent) = host_target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建浏览器通信目录：{error}"))?;
+    }
+    let host_temp = host_target.with_file_name(format!(
+        ".{}.tmp-{}",
+        browser_host_binary_name(),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&host_temp);
+    std::fs::copy(&host_source, &host_temp)
+        .map_err(|error| format!("无法安装浏览器通信程序：{error}"))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&host_temp, std::fs::Permissions::from_mode(0o755))
+        .map_err(|error| format!("无法设置浏览器通信程序权限：{error}"))?;
+    #[cfg(windows)]
+    if host_target.exists() {
+        std::fs::remove_file(&host_target)
+            .map_err(|error| format!("无法替换旧版浏览器通信程序：{error}"))?;
+    }
+    if let Err(error) = std::fs::rename(&host_temp, &host_target) {
+        let _ = std::fs::remove_file(&host_temp);
+        return Err(format!("无法启用浏览器通信程序：{error}"));
+    }
+    let configured_browsers = install_browser_native_manifests(&host_target)?;
+
+    Ok(BrowserExtensionInstallResult {
+        extension_path: extension_target.to_string_lossy().into_owned(),
+        extension_id: BROWSER_EXTENSION_ID.to_string(),
+        configured_browsers,
+    })
+}
+
+fn browser_extension_manager_target(browser: &str) -> Result<(&'static str, &'static str), String> {
+    match browser {
+        "chrome" => Ok(("Google Chrome", "chrome://extensions/")),
+        "edge" => Ok(("Microsoft Edge", "edge://extensions/")),
+        "brave" => Ok(("Brave Browser", "brave://extensions/")),
+        "chromium" => Ok(("Chromium", "chrome://extensions/")),
+        _ => Err("不支持的浏览器".to_string()),
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn browser_profile_root(browser: &str) -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "无法确定当前用户目录".to_string())?;
+    #[cfg(target_os = "macos")]
+    let relative = match browser {
+        "chrome" => "Library/Application Support/Google/Chrome",
+        "edge" => "Library/Application Support/Microsoft Edge",
+        "brave" => "Library/Application Support/BraveSoftware/Brave-Browser",
+        "chromium" => "Library/Application Support/Chromium",
+        _ => return Err("不支持的浏览器".to_string()),
+    };
+    #[cfg(target_os = "linux")]
+    let relative = match browser {
+        "chrome" => ".config/google-chrome",
+        "edge" => ".config/microsoft-edge",
+        "brave" => ".config/BraveSoftware/Brave-Browser",
+        "chromium" => ".config/chromium",
+        _ => return Err("不支持的浏览器".to_string()),
+    };
+    Ok(home.join(relative))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn extension_setting_state(settings: &serde_json::Value) -> (bool, bool) {
+    let state_enabled = settings.get("state").and_then(|state| state.as_i64()) != Some(0);
+    let has_disable_reason = settings
+        .get("disable_reasons")
+        .and_then(|reasons| reasons.as_array())
+        .map(|reasons| !reasons.is_empty())
+        .unwrap_or(false);
+    let enabled = state_enabled && !has_disable_reason;
+    let auto_capture_ready = enabled
+        && settings
+            .get("active_permissions")
+            .and_then(|permissions| permissions.get("scriptable_host"))
+            .and_then(|hosts| hosts.as_array())
+            .map(|hosts| {
+                hosts.iter().any(|host| {
+                    host.as_str()
+                        .map(|host| host.contains("lanhuapp.com") || host.contains("lanhu.com"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+    (enabled, auto_capture_ready)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn extension_profile_state(profile_root: &Path) -> (bool, bool, bool) {
+    let mut profile_dirs = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(profile_root) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                profile_dirs.push(entry.path());
+            }
+        }
+    }
+
+    let mut installed = false;
+    let mut enabled = false;
+    let mut auto_capture_ready = false;
+    for profile_dir in profile_dirs {
+        for file_name in ["Preferences", "Secure Preferences"] {
+            let Ok(bytes) = std::fs::read(profile_dir.join(file_name)) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            let Some(settings) = value
+                .get("extensions")
+                .and_then(|extensions| extensions.get("settings"))
+                .and_then(|settings| settings.get(BROWSER_EXTENSION_ID))
+            else {
+                continue;
+            };
+
+            installed = true;
+            let (setting_enabled, setting_auto_capture_ready) = extension_setting_state(settings);
+            enabled |= setting_enabled;
+            auto_capture_ready |= setting_auto_capture_ready;
+        }
+    }
+    (installed, enabled, auto_capture_ready)
+}
+
+fn browser_extension_status_value(
+    browser: &str,
+    runtime: &CaptureRuntime,
+) -> Result<BrowserExtensionStatus, String> {
+    let (browser_name, _) = browser_extension_manager_target(browser)?;
+    let heartbeat = runtime
+        .inner
+        .lock()
+        .ok()
+        .and_then(|inner| inner.browser_heartbeats.get(browser).cloned())
+        .filter(|heartbeat| heartbeat.received_at.elapsed() <= BROWSER_HEARTBEAT_TIMEOUT);
+    let connected = heartbeat.is_some();
+    let extension_version = heartbeat.map(|heartbeat| heartbeat.extension_version);
+    let version_current = extension_version.as_deref() == Some(BROWSER_EXTENSION_VERSION);
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let (installed, enabled, auto_capture_ready, native_host_installed) = {
+        let profile_root = browser_profile_root(browser)?;
+        let (installed, enabled, auto_capture_ready) = extension_profile_state(&profile_root);
+        let native_host_installed = profile_root
+            .join("NativeMessagingHosts")
+            .join(format!("{BROWSER_NATIVE_HOST_NAME}.json"))
+            .is_file();
+        (
+            installed,
+            enabled,
+            auto_capture_ready,
+            native_host_installed,
+        )
+    };
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let (installed, enabled, auto_capture_ready, native_host_installed) =
+        (false, false, false, false);
+
+    Ok(BrowserExtensionStatus {
+        browser: browser_name.to_string(),
+        installed: installed || connected,
+        enabled: enabled || connected,
+        auto_capture_ready: auto_capture_ready || connected,
+        native_host_installed: native_host_installed || connected,
+        connected,
+        version_current,
+        extension_version,
+    })
+}
+
+#[tauri::command]
+fn browser_extension_status(
+    browser: String,
+    runtime: tauri::State<'_, CaptureRuntime>,
+) -> Result<BrowserExtensionStatus, String> {
+    browser_extension_status_value(&browser, &runtime)
+}
+
+fn open_browser_url(browser: &str, url: &str) -> Result<(), String> {
+    let (application, _) = browser_extension_manager_target(browser)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("/usr/bin/open")
+            .arg("-a")
+            .arg(application)
+            .arg(url)
+            .output()
+            .map_err(|error| format!("无法打开 {application}：{error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("无法打开 {application}，请确认浏览器已经安装")
+        } else {
+            detail
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Stdio;
+
+        let candidates: &[&str] = match browser {
+            "chrome" => &["google-chrome", "google-chrome-stable"],
+            "edge" => &["microsoft-edge", "microsoft-edge-stable"],
+            "brave" => &["brave-browser", "brave"],
+            "chromium" => &["chromium", "chromium-browser"],
+            _ => &[],
+        };
+        for executable in candidates {
+            if Command::new(executable)
+                .arg(url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        return Err(format!("无法打开 {application}，请确认浏览器已经安装"));
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (application, url);
+        Err("当前版本暂不支持自动打开系统浏览器".to_string())
+    }
+}
+
+#[tauri::command]
+fn open_browser_extension_manager(browser: String) -> Result<(), String> {
+    let (_, url) = browser_extension_manager_target(&browser)?;
+    open_browser_url(&browser, url)
+}
+
+fn browser_capture_url(mut url: Url, capture_id: &str) -> Url {
+    let retained = url
+        .query_pairs()
+        .filter(|(key, _)| key != "designbridge_capture")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    url.set_query(None);
+    url.query_pairs_mut()
+        .extend_pairs(retained)
+        .append_pair("designbridge_capture", capture_id);
+    url
+}
+
+#[tauri::command]
+fn start_browser_extension_capture(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, CaptureRuntime>,
+    url: String,
+    browser: String,
+) -> Result<String, String> {
+    let parsed_url = lanhu_url(&url)?;
+    let route = lanhu_route(&parsed_url);
+    if route.project_id.is_none() || route.image_id.is_none() {
+        return Err("请粘贴具体的蓝湖设计稿链接".to_string());
+    }
+
+    let status = browser_extension_status_value(&browser, &runtime)?;
+    if !status.installed || !status.enabled {
+        return Err(format!(
+            "未检测到 {} 中已启用的 DesignBridge 扩展，请先点击“安装浏览器扩展”",
+            status.browser
+        ));
+    }
+    if !status.auto_capture_ready {
+        return Err(format!(
+            "{} 中仍是旧版 DesignBridge 扩展，请在扩展管理页点击“重新加载”",
+            status.browser
+        ));
+    }
+    if !status.native_host_installed {
+        return Err("浏览器通信程序尚未安装，请重新点击“安装浏览器扩展”".to_string());
+    }
+    if !status.connected {
+        return Err(format!(
+            "{} 中的 DesignBridge 扩展未连接当前客户端，请重新加载扩展后重试",
+            status.browser
+        ));
+    }
+    if !status.version_current {
+        return Err(format!(
+            "浏览器扩展版本不是 {BROWSER_EXTENSION_VERSION}，请更新并重新加载扩展"
+        ));
+    }
+
+    let capture_id = capture_id();
+    reserve_capture(&runtime, &capture_id, url.trim())?;
+    let target_url = browser_capture_url(parsed_url, &capture_id);
+    if let Err(error) = open_browser_url(&browser, target_url.as_str()) {
+        take_source(&runtime, &capture_id);
+        return Err(error);
+    }
+
+    emit_progress(
+        &app,
+        &capture_id,
+        "authorize",
+        "已打开系统浏览器，等待扩展读取登录状态…",
+        8,
+    );
+
+    let timeout_app = app.clone();
+    let timeout_capture_id = capture_id.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(30));
+        if expire_pending_browser_capture(
+            &timeout_app.state::<CaptureRuntime>(),
+            &timeout_capture_id,
+        ) {
+            emit_failure(
+                &timeout_app,
+                &timeout_capture_id,
+                "浏览器扩展未响应，请确认扩展已刷新且当前浏览器已登录蓝湖",
+            );
+        }
+    });
+
+    Ok(capture_id)
+}
+
 #[tauri::command]
 fn install_codex_plugin(app: tauri::AppHandle) -> Result<String, String> {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2985,12 +3990,21 @@ pub fn run() {
     tauri::Builder::default()
         .manage(CaptureRuntime::default())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            start_browser_extension_listener(app.handle().clone())
+                .map_err(std::io::Error::other)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start_lanhu_capture,
+            start_browser_extension_capture,
             cancel_lanhu_capture,
             list_saved_captures,
             export_slice_variants,
             delete_saved_capture,
+            install_browser_extension,
+            browser_extension_status,
+            open_browser_extension_manager,
             install_codex_plugin
         ])
         .run(tauri::generate_context!())
@@ -3439,6 +4453,80 @@ mod tests {
             find_json_url(&value).as_deref(),
             Some("https://alipic.lanhuapp.com/design.json")
         );
+    }
+
+    #[test]
+    fn limits_browser_extension_manager_targets() {
+        assert_eq!(
+            browser_extension_manager_target("chrome").unwrap(),
+            ("Google Chrome", "chrome://extensions/")
+        );
+        assert_eq!(
+            browser_extension_manager_target("edge").unwrap(),
+            ("Microsoft Edge", "edge://extensions/")
+        );
+        assert!(browser_extension_manager_target("safari").is_err());
+    }
+
+    #[test]
+    fn adds_browser_capture_marker_without_changing_lanhu_route() {
+        let source = lanhu_url(
+            "https://lanhuapp.com/web/#/item/project/detailDetach?pid=project&image_id=design",
+        )
+        .unwrap();
+        let marked = browser_capture_url(source, "123-4");
+
+        assert_eq!(
+            marked
+                .query_pairs()
+                .find(|(key, _)| key == "designbridge_capture")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("123-4")
+        );
+        let route = lanhu_route(&marked);
+        assert_eq!(route.project_id.as_deref(), Some("project"));
+        assert_eq!(route.image_id.as_deref(), Some("design"));
+    }
+
+    #[test]
+    fn reads_optional_browser_capture_id_from_camel_case() {
+        let request: BrowserCaptureRequest = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "type": "capture",
+            "captureId": "123-4",
+            "url": "https://lanhuapp.com/web/#/?pid=project&image_id=design",
+            "cookie": "",
+            "authToken": "secret"
+        }))
+        .unwrap();
+
+        assert_eq!(request.capture_id.as_deref(), Some("123-4"));
+        assert_eq!(request.auth_token, "secret");
+    }
+
+    #[test]
+    fn creates_lanhu_basic_authorization_from_page_token() {
+        let value = lanhu_authorization_header("secret").unwrap();
+        assert_eq!(value.to_str().unwrap(), "Basic c2VjcmV0Og==");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn distinguishes_installed_extension_from_loaded_auto_capture_script() {
+        let old_settings = serde_json::json!({
+            "disable_reasons": [],
+            "active_permissions": { "scriptable_host": [] }
+        });
+        assert_eq!(extension_setting_state(&old_settings), (true, false));
+
+        let current_settings = serde_json::json!({
+            "disable_reasons": [],
+            "active_permissions": {
+                "scriptable_host": ["https://*.lanhuapp.com/*"]
+            }
+        });
+        assert_eq!(extension_setting_state(&current_settings), (true, true));
     }
 
     #[test]

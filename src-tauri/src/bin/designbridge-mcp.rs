@@ -1051,10 +1051,9 @@ mod tests {
 
     #[test]
     fn keeps_different_layer_links_distinct() {
-        let first = parse_design_reference(
-            "designbridge://design/project-1/image-2?node-id=layer%3Afirst",
-        )
-        .unwrap();
+        let first =
+            parse_design_reference("designbridge://design/project-1/image-2?node-id=layer%3Afirst")
+                .unwrap();
         let second = parse_design_reference(
             "designbridge://design/project-1/image-2?node-id=layer%3Asecond",
         )
