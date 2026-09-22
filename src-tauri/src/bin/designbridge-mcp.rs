@@ -191,7 +191,9 @@ impl DesignBridgeMcp {
     async fn resolve(&self, link: &str) -> Result<(ResolvedDesign, DesignReference), String> {
         let reference = parse_design_reference(link)?;
         let captures = self.load_captures().await?;
-        for capture in captures {
+        let mut fallback = None;
+        let mut metadata_found = false;
+        for capture in &captures {
             if capture.project_id != reference.project_id {
                 continue;
             }
@@ -201,8 +203,29 @@ impl DesignBridgeMcp {
                 .find(|design| design.id == reference.image_id)
                 .cloned()
             {
-                return Ok((ResolvedDesign { capture, design }, reference));
+                metadata_found = true;
+                if design.local_path.is_none() {
+                    continue;
+                }
+                let owns_page = parse_design_reference(&capture.source_url)
+                    .map(|source| source.image_id == reference.image_id)
+                    .unwrap_or(false);
+                if owns_page {
+                    return Ok((ResolvedDesign { capture: capture.clone(), design }, reference));
+                }
+                if fallback.is_none() {
+                    fallback = Some(ResolvedDesign { capture: capture.clone(), design });
+                }
             }
+        }
+        if let Some(resolved) = fallback {
+            return Ok((resolved, reference));
+        }
+        if metadata_found {
+            return Err(format!(
+                "design is known but not loaded: project_id={}, image_id={}. Open this page in DesignBridge first.",
+                reference.project_id, reference.image_id
+            ));
         }
         Err(format!(
             "design not found in local captures: project_id={}, image_id={}. Capture it in DesignBridge first.",

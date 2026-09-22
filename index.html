@@ -56,6 +56,7 @@
           <button class="secondary-button plugin-install-button" id="install-plugin-button" type="button">
             安装 Codex 插件
           </button>
+          <button class="secondary-button" id="clear-cache-button" type="button">清除缓存</button>
           <div class="progress-panel hidden" id="progress-panel" aria-live="polite">
             <div class="progress-copy">
               <span id="progress-message">正在连接蓝湖…</span>
@@ -75,6 +76,12 @@
       <div class="workspace">
         <aside class="sidebar" id="sidebar" aria-label="抓取记录">
           <div class="sidebar-surface" id="sidebar-surface">
+            <div class="page-list-panel hidden" id="page-list-panel">
+              <button class="page-list-heading" id="page-list-toggle" type="button" aria-expanded="true">
+                <span>页面</span><span class="page-list-chevron" aria-hidden="true">⌃</span>
+              </button>
+              <div class="page-list" id="page-list"></div>
+            </div>
             <div class="sidebar-heading">
               <span>抓取记录</span>
               <span class="history-count" id="history-count">0</span>
@@ -122,6 +129,9 @@
                   </div>
                 </header>
                 <div class="artboard-scroll" id="artboard-scroll">
+                  <aside class="canvas-page-rail hidden" id="canvas-page-rail" aria-label="当前画板页面">
+                    <div class="canvas-page-list" id="canvas-page-list"></div>
+                  </aside>
                   <div class="artboard-wrap" id="artboard-wrap">
                     <img id="artboard-image" alt="" draggable="false" />
                     <div class="slice-outlines" id="slice-outlines" aria-hidden="true"></div>

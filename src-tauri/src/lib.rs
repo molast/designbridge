@@ -204,6 +204,13 @@ struct ExportSliceRequest {
     scales: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteSavedDesignsRequest {
+    project_id: String,
+    design_ids: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExportedSliceFile {
@@ -331,6 +338,7 @@ struct LanhuRoute {
     team_id: Option<String>,
     project_id: Option<String>,
     image_id: Option<String>,
+    child: Option<String>,
 }
 
 fn lanhu_route(url: &Url) -> LanhuRoute {
@@ -346,6 +354,7 @@ fn lanhu_route(url: &Url) -> LanhuRoute {
             "tid" | "team_id" => route.team_id = Some(value.into_owned()),
             "pid" | "project_id" => route.project_id = Some(value.into_owned()),
             "image_id" | "docId" => route.image_id = Some(value.into_owned()),
+            "child" => route.child = Some(value.into_owned()),
             _ => {}
         }
     }
@@ -1263,6 +1272,9 @@ fn api_url(route: &LanhuRoute) -> Result<Url, String> {
         query.append_pair("dds_status", "1");
         if let Some(team_id) = route.team_id.as_deref() {
             query.append_pair("team_id", team_id);
+        }
+        if let Some(child) = route.child.as_deref() {
+            query.append_pair("child", child);
         }
         if let Some(image_id) = route.image_id.as_deref() {
             query.append_pair("image_id", image_id);
@@ -2500,6 +2512,29 @@ async fn fetch_lanhu_project(
     let response = request_lanhu_json(&client, endpoint).await?;
     let mut project = project_from_response(&response, route, source_url)?;
 
+    // Editor links include both `image_id` and `child`. The image endpoint is
+    // needed for the selected page's layers, while the project endpoint gives
+    // us the sibling page metadata without downloading their bitmaps.
+    if route.image_id.is_some() && route.child.is_some() {
+        let mut pages_route = route.clone();
+        pages_route.image_id = None;
+        if let Ok(pages_response) = request_lanhu_json(&client, api_url(&pages_route)?).await {
+            if let Ok(pages_project) = project_from_response(&pages_response, &pages_route, source_url) {
+                let selected_id = route.image_id.as_deref().unwrap_or_default();
+                let selected_design = project.designs.into_iter().find(|design| design.id == selected_id);
+                let mut designs = pages_project.designs;
+                if let Some(selected_design) = selected_design {
+                    if let Some(position) = designs.iter().position(|design| design.id == selected_id) {
+                        designs[position] = selected_design;
+                    } else {
+                        designs.push(selected_design);
+                    }
+                }
+                project.designs = designs;
+            }
+        }
+    }
+
     // `project/image` has appeared in both `{data: {result: ...}}` and `{result: ...}` forms.
     if let Some(json_url) = find_json_url(&response) {
         let json_url = safe_asset_url(&json_url)?;
@@ -2643,20 +2678,7 @@ async fn download_design(
     index: usize,
     design: LanhuDesignPayload,
 ) -> CapturedDesign {
-    let has_comment = design.has_comment.unwrap_or(!design.comments.is_empty());
-    let mut captured = CapturedDesign {
-        id: design.id,
-        name: design.name,
-        width: design.width,
-        height: design.height,
-        coordinate_space: design.coordinate_space,
-        update_time: design.update_time,
-        has_comment,
-        comments: design.comments,
-        remote_url: design.url.clone(),
-        local_path: None,
-        error: None,
-    };
+    let mut captured = captured_design_metadata(&design);
 
     let url = match original_asset_url(&design.url) {
         Ok(url) => url,
@@ -2708,6 +2730,22 @@ async fn download_design(
     }
 
     captured
+}
+
+fn captured_design_metadata(design: &LanhuDesignPayload) -> CapturedDesign {
+    CapturedDesign {
+        id: design.id.clone(),
+        name: design.name.clone(),
+        width: design.width,
+        height: design.height,
+        coordinate_space: design.coordinate_space.clone(),
+        update_time: design.update_time.clone(),
+        has_comment: design.has_comment.unwrap_or(!design.comments.is_empty()),
+        comments: design.comments.clone(),
+        remote_url: design.url.clone(),
+        local_path: None,
+        error: None,
+    }
 }
 
 async fn download_slice(
@@ -3038,8 +3076,13 @@ async fn persist_project(
 
     let total = pending_designs.len();
     let mut designs = Vec::with_capacity(total);
+    let lazy_pages = total > 1;
     for (index, design) in pending_designs.into_iter().enumerate() {
-        let captured = download_design(&client, &output_dir, index, design).await;
+        let captured = if lazy_pages && index > 0 {
+            captured_design_metadata(&design)
+        } else {
+            download_design(&client, &output_dir, index, design).await
+        };
         designs.push(captured);
         let progress = (index + 1)
             .checked_mul(58)
@@ -3049,7 +3092,7 @@ async fn persist_project(
             app,
             capture_id,
             "download",
-            &format!("正在下载画板 {}/{}", index + 1, total),
+            &format!("{}画板 {}/{}", if lazy_pages && index > 0 { "已读取" } else { "正在下载" }, index + 1, total),
             progress,
         );
     }
@@ -3427,6 +3470,193 @@ async fn delete_saved_capture(app: tauri::AppHandle, capture_id: String) -> Resu
     }
 
     Err("抓取记录不存在".to_string())
+}
+
+#[tauri::command]
+async fn delete_saved_designs(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, CaptureRuntime>,
+    request: DeleteSavedDesignsRequest,
+) -> Result<usize, String> {
+    if request.project_id.is_empty() || request.design_ids.is_empty() || request.design_ids.len() > 500 {
+        return Err("无效的页面删除请求".to_string());
+    }
+    let design_ids = request.design_ids.into_iter().collect::<HashSet<_>>();
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法确定应用数据目录：{error}"))?
+        .join("captures");
+    let _file_guard = runtime.file_ops.lock().await;
+    let mut entries = match tokio::fs::read_dir(&root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("无法读取抓取历史：{error}")),
+    };
+    let mut deleted = 0usize;
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("无法读取抓取历史：{error}"))?
+    {
+        if !entry.file_type().await.map_err(|error| format!("无法检查抓取记录：{error}"))?.is_dir() {
+            continue;
+        }
+        let directory = entry.path();
+        let metadata_path = directory.join("capture.json");
+        let Ok(bytes) = tokio::fs::read(&metadata_path).await else {
+            continue;
+        };
+        let Ok(mut capture) = serde_json::from_slice::<CaptureResult>(&bytes) else {
+            continue;
+        };
+        if capture.project_id != request.project_id
+            || !capture.designs.iter().any(|design| design_ids.contains(&design.id))
+        {
+            continue;
+        }
+
+        for design in capture.designs.iter().filter(|design| design_ids.contains(&design.id)) {
+            if let Some(path) = design.local_path.as_deref().map(PathBuf::from).filter(|path| path.starts_with(&directory)) {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+            deleted += 1;
+        }
+
+        let source_design_id = Url::parse(&capture.source_url)
+            .ok()
+            .and_then(|url| lanhu_route(&url).image_id);
+        let owns_deleted_resources = source_design_id
+            .as_ref()
+            .map(|id| design_ids.contains(id))
+            .unwrap_or(false);
+        if owns_deleted_resources {
+            for slice in &capture.slices {
+                if let Some(path) = slice.local_path.as_deref().map(PathBuf::from).filter(|path| path.starts_with(&directory)) {
+                    let _ = tokio::fs::remove_file(path).await;
+                }
+            }
+            let exports = directory.join("exports");
+            if tokio::fs::try_exists(&exports).await.unwrap_or(false) {
+                let _ = tokio::fs::remove_dir_all(exports).await;
+            }
+            capture.slices.clear();
+            capture.layers.clear();
+            capture.slice_downloaded_count = 0;
+            capture.slice_failed_count = 0;
+            capture.slice_total_count = 0;
+            capture.slices_complete = true;
+        }
+
+        capture.designs.retain(|design| !design_ids.contains(&design.id));
+        if capture.designs.is_empty() {
+            tokio::fs::remove_dir_all(&directory)
+                .await
+                .map_err(|error| format!("无法删除页面资源：{error}"))?;
+            continue;
+        }
+        capture.downloaded_count = capture.designs.iter().filter(|design| design.local_path.is_some()).count();
+        capture.failed_count = capture.designs.iter().filter(|design| design.error.is_some()).count();
+        let metadata = serde_json::to_vec_pretty(&capture)
+            .map_err(|error| format!("无法生成项目元数据：{error}"))?;
+        tokio::fs::write(metadata_path, metadata)
+            .await
+            .map_err(|error| format!("无法更新项目元数据：{error}"))?;
+    }
+    Ok(deleted)
+}
+
+#[tauri::command]
+async fn clear_saved_design_cache(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, CaptureRuntime>,
+) -> Result<usize, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法确定应用数据目录：{error}"))?
+        .join("captures");
+    let _file_guard = runtime.file_ops.lock().await;
+    let mut entries = match tokio::fs::read_dir(&root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("无法读取抓取历史：{error}")),
+    };
+    let mut cleared_pages = 0usize;
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("无法读取抓取历史：{error}"))?
+    {
+        if !entry
+            .file_type()
+            .await
+            .map_err(|error| format!("无法检查抓取记录：{error}"))?
+            .is_dir()
+        {
+            continue;
+        }
+        let directory = entry.path();
+        let metadata_path = directory.join("capture.json");
+        let Ok(bytes) = tokio::fs::read(&metadata_path).await else {
+            continue;
+        };
+        let Ok(mut capture) = serde_json::from_slice::<CaptureResult>(&bytes) else {
+            continue;
+        };
+
+        let mut resources = tokio::fs::read_dir(&directory)
+            .await
+            .map_err(|error| format!("无法读取缓存目录：{error}"))?;
+        while let Some(resource) = resources
+            .next_entry()
+            .await
+            .map_err(|error| format!("无法读取缓存资源：{error}"))?
+        {
+            if resource.file_name() == "capture.json" {
+                continue;
+            }
+            let file_type = resource
+                .file_type()
+                .await
+                .map_err(|error| format!("无法检查缓存资源：{error}"))?;
+            if file_type.is_dir() {
+                tokio::fs::remove_dir_all(resource.path())
+                    .await
+                    .map_err(|error| format!("无法删除缓存目录：{error}"))?;
+            } else {
+                tokio::fs::remove_file(resource.path())
+                    .await
+                    .map_err(|error| format!("无法删除缓存文件：{error}"))?;
+            }
+        }
+
+        cleared_pages += capture
+            .designs
+            .iter()
+            .filter(|design| design.local_path.is_some())
+            .count();
+        for design in &mut capture.designs {
+            design.local_path = None;
+            design.error = None;
+        }
+        capture.downloaded_count = 0;
+        capture.failed_count = 0;
+        capture.slices.clear();
+        capture.layers.clear();
+        capture.slice_downloaded_count = 0;
+        capture.slice_failed_count = 0;
+        capture.slice_total_count = 0;
+        capture.slices_complete = true;
+        let metadata = serde_json::to_vec_pretty(&capture)
+            .map_err(|error| format!("无法生成项目元数据：{error}"))?;
+        tokio::fs::write(metadata_path, metadata)
+            .await
+            .map_err(|error| format!("无法更新项目元数据：{error}"))?;
+    }
+    Ok(cleared_pages)
 }
 
 fn copy_directory(source: &Path, target: &Path) -> Result<(), String> {
@@ -4002,6 +4232,8 @@ pub fn run() {
             list_saved_captures,
             export_slice_variants,
             delete_saved_capture,
+            delete_saved_designs,
+            clear_saved_design_cache,
             install_browser_extension,
             browser_extension_status,
             open_browser_extension_manager,
@@ -4024,11 +4256,12 @@ mod tests {
 
     #[test]
     fn extracts_route_from_hash_query() {
-        let url = lanhu_url("https://lanhuapp.com/web/#/item/project/detailDetach?tid=t1&pid=p1&project_id=p1&image_id=i1").unwrap();
+        let url = lanhu_url("https://lanhuapp.com/web/#/item/project/detailDetach?tid=t1&pid=p1&project_id=p1&image_id=i1&child=c1").unwrap();
         let route = lanhu_route(&url);
         assert_eq!(route.team_id.as_deref(), Some("t1"));
         assert_eq!(route.project_id.as_deref(), Some("p1"));
         assert_eq!(route.image_id.as_deref(), Some("i1"));
+        assert_eq!(route.child.as_deref(), Some("c1"));
     }
 
     #[test]

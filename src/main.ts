@@ -1,6 +1,9 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { ChevronDown, ChevronRight, Folder, Image as ImageIcon, type LucideIcon } from "lucide-react";
 import { mountPhotoPreview, showPhotoPreview, type PreviewItem } from "./photo-preview";
 import {
   mountPlatformPicker,
@@ -23,6 +26,10 @@ type CaptureProgress = {
   message: string;
   percent: number;
 };
+
+function iconMarkup(icon: LucideIcon, className: string): string {
+  return renderToStaticMarkup(createElement(icon, { className, "aria-hidden": true }));
+}
 
 type CaptureFailure = {
   captureId: string;
@@ -255,8 +262,12 @@ const progressBar = document.querySelector<HTMLElement>("#progress-bar")!;
 const appStatus = document.querySelector<HTMLElement>("#app-status")!;
 const installBrowserExtensionButton = document.querySelector<HTMLButtonElement>("#install-browser-extension-button")!;
 const installPluginButton = document.querySelector<HTMLButtonElement>("#install-plugin-button")!;
+const clearCacheButton = document.querySelector<HTMLButtonElement>("#clear-cache-button")!;
 const historyCount = document.querySelector<HTMLElement>("#history-count")!;
 const historyList = document.querySelector<HTMLElement>("#history-list")!;
+const pageListPanel = document.querySelector<HTMLElement>("#page-list-panel")!;
+const pageList = document.querySelector<HTMLElement>("#page-list")!;
+const pageListToggle = document.querySelector<HTMLButtonElement>("#page-list-toggle")!;
 const sidebar = document.querySelector<HTMLElement>("#sidebar")!;
 const sidebarSurface = document.querySelector<HTMLElement>("#sidebar-surface")!;
 const sidebarResizeHandle = document.querySelector<HTMLElement>("#sidebar-resize-handle")!;
@@ -272,6 +283,8 @@ const zoomOutButton = document.querySelector<HTMLButtonElement>("#zoom-out-butto
 const zoomInButton = document.querySelector<HTMLButtonElement>("#zoom-in-button")!;
 const zoomInput = document.querySelector<HTMLInputElement>("#zoom-input")!;
 const artboardScroll = document.querySelector<HTMLElement>("#artboard-scroll")!;
+const canvasPageRail = document.querySelector<HTMLElement>("#canvas-page-rail")!;
+const canvasPageList = document.querySelector<HTMLElement>("#canvas-page-list")!;
 const artboardWrap = document.querySelector<HTMLElement>("#artboard-wrap")!;
 const artboardImage = document.querySelector<HTMLImageElement>("#artboard-image")!;
 const sliceOutlines = document.querySelector<HTMLElement>("#slice-outlines")!;
@@ -282,6 +295,7 @@ const layerHighlightSize = document.querySelector<HTMLElement>("#layer-highlight
 const layerDetails = document.querySelector<HTMLElement>("#layer-details")!;
 const sliceExportRoot = document.querySelector<HTMLElement>("#slice-export-root")!;
 const deleteConfirmDialog = document.querySelector<HTMLDialogElement>("#delete-confirm-dialog")!;
+const deleteConfirmTitle = document.querySelector<HTMLElement>("#delete-confirm-title")!;
 const deleteConfirmMessage = document.querySelector<HTMLElement>("#delete-confirm-message")!;
 const deleteConfirmError = document.querySelector<HTMLElement>("#delete-confirm-error")!;
 const deleteCancelButton = document.querySelector<HTMLButtonElement>("#delete-cancel-button")!;
@@ -302,6 +316,10 @@ const replacementCaptureIds = new Map<string, string>();
 let selectedCapture: CaptureResult | null = null;
 let selectedLayerId: string | null = null;
 let selectedCommentId: string | null = null;
+let selectedDesignId: string | null = null;
+let pageGroupCollapsed = false;
+const expandedHistoryGroups = new Set<string>();
+const pageGroupOrders = new Map<string, string[]>();
 let selectedPlatform: TargetPlatform = "android";
 let hitStack: { captureId: string; x: number; y: number; layerIds: string[]; index: number } | null = null;
 let panState: {
@@ -320,6 +338,8 @@ let captureAttempts: CaptureAttempt[] = [];
 let activeCaptureKey: string | null = null;
 let selectedHistoryKey: string | null = null;
 let pendingDeleteCaptureId: string | null = null;
+let pendingDeleteDesigns: { projectId: string; designIds: string[]; title: string } | null = null;
+let pendingClearCache = false;
 let inspectorFitFrame = 0;
 let sidebarResizeState: { pointerId: number; startX: number; width: number } | null = null;
 let installedBrowserExtensionPath: string | null = null;
@@ -581,8 +601,8 @@ function androidFrame(design: CapturedDesign | undefined): PlatformFrame | null 
 }
 
 function updatePlatformPicker(capture: CaptureResult | null) {
-  const design = capture?.designs.find((item) => item.error == null);
-  showPlatformPicker(androidFrame(design), selectedPlatform);
+  const design = currentDesign(capture);
+  showPlatformPicker(androidFrame(design || undefined), selectedPlatform);
 }
 
 function changeTargetPlatform(platform: TargetPlatform) {
@@ -616,12 +636,84 @@ function slicesComplete(capture: CaptureResult): boolean {
 }
 
 function currentCoordinate(): PlatformFrame | null {
-  const design = selectedCapture?.designs.find((item) => item.localPath && item.error == null);
-  return androidFrame(design);
+  return androidFrame(currentDesign() || undefined);
 }
 
 function currentDesign(capture: CaptureResult | null = selectedCapture): CapturedDesign | null {
-  return capture?.designs.find((item) => item.localPath && item.error == null) || null;
+  if (!capture) return null;
+  const selected = selectedDesignId && capture.designs.find(
+    (item) => item.id === selectedDesignId && item.localPath && item.error == null,
+  );
+  return selected || capture.designs.find((item) => item.localPath && item.error == null) || null;
+}
+
+function selectDesignPage(designId: string) {
+  if (!selectedCapture || selectedDesignId === designId) return;
+  const design = groupedDesigns(selectedCapture).find((item) => item.id === designId && item.error == null);
+  if (!design) return;
+  const cachedCapture = history.find((capture) =>
+    capture.captureId !== selectedCapture?.captureId && capture.designs.some(
+      (item) => item.id === designId && item.localPath && item.error == null,
+    ),
+  );
+  if (cachedCapture) {
+    selectedDesignId = designId;
+    renderCapture(cachedCapture);
+    return;
+  }
+  if (!design.localPath) {
+    const cached = history
+      .flatMap((capture) => capture.designs)
+      .find((item) => item.id === design.id && item.localPath && item.error == null);
+    if (cached?.localPath) {
+      design.localPath = cached.localPath;
+      design.width = cached.width;
+      design.height = cached.height;
+      design.coordinateSpace = cached.coordinateSpace;
+      design.comments = cached.comments;
+    }
+  }
+  if (!design.localPath) {
+    const pageUrl = designPageUrl(selectedCapture.sourceUrl, design.id);
+    if (pageUrl) void startCapture(pageUrl);
+    return;
+  }
+  selectedDesignId = design.id;
+  selectedLayerId = null;
+  selectedCommentId = null;
+  hitStack = null;
+  commentPopover.classList.add("hidden");
+  commentPopover.replaceChildren();
+  renderPageList(selectedCapture);
+  const source = localImageSource(design.localPath);
+  canvasTitle.textContent = design.name;
+  artboardImage.alt = design.name;
+  artboardImage.src = source || "";
+  applyCanvasPan();
+  applyCanvasZoom();
+  updatePlatformPicker(selectedCapture);
+  showMcpLinkButton(designMcpTarget(selectedCapture, design));
+  renderSliceOutlines(selectedCapture);
+  renderCommentMarkers(selectedCapture);
+  renderLayerSelection();
+}
+
+function designPageUrl(sourceUrl: string, designId: string): string | null {
+  try {
+    const url = new URL(sourceUrl);
+    const hashQueryIndex = url.hash.indexOf("?");
+    const params = new URLSearchParams(hashQueryIndex >= 0 ? url.hash.slice(hashQueryIndex + 1) : url.search);
+    params.set("image_id", designId);
+    params.delete("child");
+    if (hashQueryIndex >= 0) {
+      url.hash = `${url.hash.slice(0, hashQueryIndex + 1)}${params.toString()}`;
+    } else {
+      url.search = params.toString();
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function designComments(design: CapturedDesign | null): DesignComment[] {
@@ -632,8 +724,12 @@ function applyCanvasZoom() {
   const coordinate = currentCoordinate();
   if (!coordinate) return;
   const scale = canvasZoom / 100;
-  artboardWrap.style.width = `${coordinate.width * scale}px`;
+  const width = coordinate.width * scale;
+  const height = coordinate.height * scale;
+  artboardWrap.style.width = `${width}px`;
   artboardWrap.style.aspectRatio = `${coordinate.width} / ${coordinate.height}`;
+  artboardScroll.style.setProperty("--canvas-artboard-width", `${width}px`);
+  artboardScroll.style.setProperty("--canvas-artboard-height", `${height}px`);
   zoomInput.value = numberValue(canvasZoom);
   zoomOutButton.disabled = canvasZoom <= MIN_CANVAS_ZOOM;
   zoomInButton.disabled = canvasZoom >= MAX_CANVAS_ZOOM;
@@ -643,6 +739,8 @@ function applyCanvasZoom() {
 function applyCanvasPan() {
   artboardWrap.style.setProperty("--canvas-pan-x", `${canvasPanX}px`);
   artboardWrap.style.setProperty("--canvas-pan-y", `${canvasPanY}px`);
+  artboardScroll.style.setProperty("--canvas-pan-x", `${canvasPanX}px`);
+  artboardScroll.style.setProperty("--canvas-pan-y", `${canvasPanY}px`);
   window.requestAnimationFrame(positionCommentPopover);
 }
 
@@ -962,6 +1060,7 @@ function setCapturing(capturing: boolean) {
   captureMethodButtons.forEach((button) => {
     button.disabled = capturing;
   });
+  clearCacheButton.disabled = capturing;
   showMcpRefreshState(capturing && selectedCapture != null && activeCaptureKey === selectedHistoryKey);
   if (!capturing) {
     activeCaptureId = null;
@@ -1023,16 +1122,67 @@ function dedupeHistory(captures: CaptureResult[]): CaptureResult[] {
 }
 
 function historyEntries(): HistoryEntry[] {
-  const captures = history.map((capture): HistoryEntry => ({
+  const groupCapturesByKey = new Map<string, CaptureResult>();
+  for (const capture of history) {
+    if (captureGroupDesigns(capture).length < 2) continue;
+    const key = captureGroupIdentity(capture);
+    if (!groupCapturesByKey.has(key)) groupCapturesByKey.set(key, capture);
+  }
+  const groupCaptures = [...groupCapturesByKey.values()];
+  const groupedDesignIds = new Set(groupCaptures.flatMap((capture) => captureGroupDesigns(capture).map((design) => design.id)));
+  const visibleHistory = history.filter((capture) => {
+    if (captureGroupDesigns(capture).length > 1) return groupCaptures.includes(capture);
+    const designIds = new Set(capture.designs.map((design) => design.id));
+    return !groupCaptures.some((group) =>
+      captureGroupDesigns(group).some((design) => designIds.has(design.id)),
+    );
+  });
+  const captures = visibleHistory.map((capture): HistoryEntry => ({
     key: captureSourceKey(capture.sourceUrl),
     updatedAt: capture.capturedAt * 1000,
     capture,
   }));
   const successfulKeys = new Set(captures.map((entry) => entry.key));
   const attempts = captureAttempts
-    .filter((attempt) => !successfulKeys.has(attempt.key))
+    .filter((attempt) => !successfulKeys.has(attempt.key) && !groupedDesignIds.has(sourceImageId(attempt.sourceUrl) || ""))
     .map((attempt): HistoryEntry => ({ key: attempt.key, updatedAt: attempt.updatedAt, attempt }));
   return [...captures, ...attempts].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function captureGroupIdentity(capture: CaptureResult): string {
+  return `${capture.projectId}:${historyCaptureTitle(capture).toLowerCase()}`;
+}
+
+function sourceImageId(sourceUrl: string): string | null {
+  try {
+    const url = new URL(sourceUrl);
+    const hashQueryIndex = url.hash.indexOf("?");
+    const params = new URLSearchParams(hashQueryIndex >= 0 ? url.hash.slice(hashQueryIndex + 1) : url.search);
+    return params.get("image_id");
+  } catch {
+    return null;
+  }
+}
+
+function captureGroupDesigns(capture: CaptureResult): CapturedDesign[] {
+  const available = capture.designs.filter((item) => item.error == null);
+  if (available.length < 2) return available;
+  const groupKey = pageGroupKey(available[0]?.name || "");
+  if (!groupKey) return available;
+  const grouped = available.filter((item) => pageGroupKey(item.name) === groupKey);
+  return grouped.length > 1 ? grouped : available;
+}
+
+function historyCaptureTitle(capture: CaptureResult): string {
+  const designs = captureGroupDesigns(capture);
+  if (designs.length < 2) return capture.projectName;
+  return pageGroupKey(designs[0].name) || capture.projectName;
+}
+
+function historyCaptureSelected(capture: CaptureResult, key: string): boolean {
+  if (selectedHistoryKey === key) return true;
+  const selectedId = currentDesign(selectedCapture)?.id;
+  return Boolean(selectedId && captureGroupDesigns(capture).some((design) => design.id === selectedId));
 }
 
 function attemptName(attempt: CaptureAttempt): string {
@@ -1052,28 +1202,53 @@ function renderHistory() {
   historyCount.textContent = String(entries.length);
   if (entries.length === 0) {
     historyList.innerHTML = '<p class="history-empty">暂无记录</p>';
+    renderPageList(null);
     return;
   }
 
   historyList.innerHTML = entries
     .map(
       (entry) => entry.capture ? `
-        <div class="history-item${selectedHistoryKey === entry.key ? " active" : ""}" data-history-key="${escapeHtml(entry.key)}">
+        <div class="history-item${historyCaptureSelected(entry.capture, entry.key) ? " active" : ""}" data-history-key="${escapeHtml(entry.key)}">
           <button class="history-select" type="button" data-select-history-key="${escapeHtml(entry.key)}">
-            <span class="history-thumbnail-count">${entry.capture.downloadedCount}</span>
+            ${captureGroupDesigns(entry.capture).length > 1
+              ? `<span class="history-group-leading">${iconMarkup(expandedHistoryGroups.has(entry.key) ? ChevronDown : ChevronRight, "history-group-chevron")}${iconMarkup(Folder, "history-folder-icon")}</span>`
+              : `<span class="history-thumbnail-count">${entry.capture.downloadedCount}</span>`}
             <span class="history-copy">
-              <strong>${escapeHtml(entry.capture.projectName)}</strong>
-              <span>${slicesComplete(entry.capture) ? "抓取完成" : "切图处理中"} · ${displayDate(entry.capture.capturedAt)}</span>
+              <strong>${escapeHtml(historyCaptureTitle(entry.capture))}</strong>
+              <span>${captureGroupDesigns(entry.capture).length > 1
+                ? `${captureGroupDesigns(entry.capture).length} 个页面`
+                : slicesComplete(entry.capture) ? "抓取完成" : "切图处理中"} · ${displayDate(entry.capture.capturedAt)}</span>
             </span>
           </button>
           <button
             class="history-delete"
             type="button"
             data-delete-capture-id="${escapeHtml(entry.capture.captureId)}"
-            aria-label="删除 ${escapeHtml(entry.capture.projectName)}"
+            aria-label="删除 ${escapeHtml(historyCaptureTitle(entry.capture))}"
             title="删除抓取记录"
           >×</button>
         </div>
+        ${captureGroupDesigns(entry.capture).length > 1 && expandedHistoryGroups.has(entry.key) ? `
+          <div class="history-group-children" role="group" aria-label="${escapeHtml(historyCaptureTitle(entry.capture))} 页面">
+            ${stablePageGroupOrder(entry.capture, captureGroupDesigns(entry.capture)).map((design) => `
+              <div class="history-group-child-row">
+                <button class="history-group-child${design.id === currentDesign(selectedCapture)?.id ? " is-active" : ""}"
+                  type="button" data-history-group-key="${escapeHtml(entry.key)}"
+                  data-history-design-id="${escapeHtml(design.id)}">
+                  ${iconMarkup(ImageIcon, "history-page-icon")}
+                  <span>${escapeHtml(design.name)}</span>
+                  ${isDesignDownloaded(design) ? '<span class="history-child-check" aria-label="已下载">&#10003;</span>' : ""}
+                </button>
+                <button class="history-child-delete" type="button"
+                  data-delete-design-id="${escapeHtml(design.id)}"
+                  data-delete-design-project="${escapeHtml(entry.capture.projectId)}"
+                  data-delete-design-title="${escapeHtml(design.name)}"
+                  aria-label="删除 ${escapeHtml(design.name)}" title="删除页面">×</button>
+              </div>
+            `).join("")}
+          </div>
+        ` : ""}
       ` : `
         <div
           class="history-item is-${entry.attempt.status}${selectedHistoryKey === entry.key ? " active" : ""}"
@@ -1102,6 +1277,92 @@ function renderHistory() {
       `,
     )
     .join("");
+  renderPageList(selectedCapture);
+}
+
+function renderPageList(capture: CaptureResult | null) {
+  const designs = groupedDesigns(capture);
+  sidebar.classList.remove("is-page-navigation");
+  pageListPanel.classList.add("hidden");
+  renderCanvasPageRail(designs);
+  if (designs.length < 2) {
+    pageList.replaceChildren();
+    return;
+  }
+  pageListToggle.setAttribute("aria-expanded", String(!pageGroupCollapsed));
+  pageListToggle.querySelector(".page-list-chevron")!.textContent = pageGroupCollapsed ? "⌄" : "⌃";
+  pageList.classList.toggle("is-collapsed", pageGroupCollapsed);
+  pageList.innerHTML = designs.map((design, index) => `
+    <button class="page-list-item${design.id === selectedDesignId ? " is-active" : ""}"
+      type="button" role="tab" aria-selected="${design.id === selectedDesignId}"
+      data-select-design-id="${escapeHtml(design.id)}" title="${escapeHtml(design.name)}">
+      <span class="page-list-index">${index + 1}</span>
+      <span class="page-list-name">${escapeHtml(design.name || `页面 ${index + 1}`)}</span>
+      ${isDesignDownloaded(design) ? '<span class="page-list-status" aria-label="已下载">&#10003;</span>' : '<span class="page-list-status is-pending" aria-label="未下载"></span>'}
+    </button>
+  `).join("");
+}
+
+function renderCanvasPageRail(designs: CapturedDesign[]) {
+  canvasPageRail.classList.toggle("hidden", designs.length < 2);
+  canvasPageList.innerHTML = designs.map((design) => `
+    <button class="canvas-page-item${design.id === selectedDesignId ? " is-active" : ""}"
+      type="button" data-canvas-design-id="${escapeHtml(design.id)}" title="${escapeHtml(design.name)}">
+      <span>${escapeHtml(design.name)}</span>
+      ${isDesignDownloaded(design) ? '<span class="canvas-page-status" aria-label="已下载">&#10003;</span>' : '<span class="canvas-page-status is-pending" aria-label="未下载"></span>'}
+    </button>
+  `).join("");
+}
+
+function isDesignDownloaded(design: CapturedDesign): boolean {
+  return Boolean(
+    design.localPath || history.some((capture) => capture.designs.some(
+      (item) => item.id === design.id && item.localPath && item.error == null,
+    )),
+  );
+}
+
+function pageGroupKey(name: string): string | null {
+  const match = name.match(/^(.+?比赛)/);
+  return match ? match[1] : null;
+}
+
+function groupedDesigns(capture: CaptureResult | null): CapturedDesign[] {
+  if (!capture) return [];
+  const available = capture.designs.filter((item) => item.error == null);
+  const selected = currentDesign(capture) || available[0];
+  if (!selected) return [];
+  if (available.length === 1) {
+    const navigationGroup = history.find((candidate) =>
+      candidate.captureId !== capture.captureId && captureGroupDesigns(candidate).some((item) => item.id === selected.id),
+    );
+    if (navigationGroup) return stablePageGroupOrder(navigationGroup, captureGroupDesigns(navigationGroup));
+  }
+  const groupKey = pageGroupKey(selected.name);
+  if (!groupKey) return available;
+  const grouped = available.filter((item) => {
+    return pageGroupKey(item.name) === groupKey;
+  });
+  return stablePageGroupOrder(capture, grouped.length > 0 ? grouped : [selected]);
+}
+
+function stablePageGroupOrder(capture: CaptureResult, designs: CapturedDesign[]): CapturedDesign[] {
+  const groupName = pageGroupKey(designs[0]?.name || "") || capture.projectName;
+  const key = `${capture.projectId}:${groupName.toLowerCase()}`;
+  let order = pageGroupOrders.get(key);
+  if (!order) {
+    const earliestGroup = history
+      .filter((candidate) => candidate.projectId === capture.projectId)
+      .sort((a, b) => a.capturedAt - b.capturedAt)
+      .map((candidate) => candidate.designs.filter((design) => pageGroupKey(design.name) === groupName))
+      .find((candidate) => candidate.length > 1);
+    order = (earliestGroup || designs).map((design) => design.id);
+    pageGroupOrders.set(key, order);
+  }
+  const positions = new Map(order.map((id, index) => [id, index]));
+  return [...designs].sort((a, b) =>
+    (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+  );
 }
 
 function scrollHistoryEntryIntoView(key: string) {
@@ -1131,6 +1392,7 @@ function renderResultMeta(capture: CaptureResult) {
 function renderEmptyCapture(state?: { title: string; detail: string }) {
   if (!state) setSelectedHistoryKey(null);
   selectedCapture = null;
+  selectedDesignId = null;
   selectedLayerId = null;
   selectedCommentId = null;
   hitStack = null;
@@ -1150,10 +1412,26 @@ function renderEmptyCapture(state?: { title: string; detail: string }) {
   applyCanvasPan();
   updatePlatformPicker(null);
   showMcpLinkButton(null);
+  renderPageList(null);
   emptyState.querySelector("strong")!.textContent = state?.title || "暂无抓取结果";
   emptyState.querySelector(":scope > span")!.textContent = state?.detail || "抓取完成的画板会显示在这里";
   renderHistory();
 }
+
+pageList.addEventListener("click", (event) => {
+  const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-select-design-id]");
+  if (target?.dataset.selectDesignId) selectDesignPage(target.dataset.selectDesignId);
+});
+
+pageListToggle.addEventListener("click", () => {
+  pageGroupCollapsed = !pageGroupCollapsed;
+  renderPageList(selectedCapture);
+});
+
+canvasPageList.addEventListener("click", (event) => {
+  const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-canvas-design-id]");
+  if (target?.dataset.canvasDesignId) selectDesignPage(target.dataset.canvasDesignId);
+});
 
 function renderCaptureAttempt(attempt: CaptureAttempt) {
   setSelectedHistoryKey(attempt.key);
@@ -1425,7 +1703,7 @@ function renderCommentPopover(comment: DesignComment) {
 function renderSliceOutlines(capture: CaptureResult | null) {
   sliceOutlines.replaceChildren();
   if (!capture) return;
-  const coordinate = androidFrame(capture.designs.find((design) => design.error == null));
+  const coordinate = androidFrame(currentDesign(capture) || undefined);
   if (!coordinate) return;
 
   const fragment = document.createDocumentFragment();
@@ -1487,7 +1765,7 @@ function renderLayerSelection() {
   inspectorDetails.classList.remove("hidden");
   scheduleInspectorFit();
 
-  const coordinate = androidFrame(capture.designs.find((design) => design.error == null));
+  const coordinate = androidFrame(currentDesign(capture) || undefined);
   if (layer.frame && coordinate && layer.frame.width > 0 && layer.frame.height > 0) {
     const left = Math.max(0, layer.frame.x);
     const top = Math.max(0, layer.frame.y);
@@ -1612,9 +1890,24 @@ function renderLayerSelection() {
   renderCommentMarkers(capture);
 }
 
+function capturesSharePageGroup(previous: CaptureResult | null, next: CaptureResult): boolean {
+  if (!previous || previous.projectId !== next.projectId) return false;
+  const previousId = currentDesign(previous)?.id;
+  const nextIds = new Set(next.designs.map((design) => design.id));
+  if (previousId && nextIds.has(previousId)) return true;
+  const nextId = next.designs.find((design) => design.error == null)?.id;
+  if (!previousId || !nextId) return false;
+  return history.some((candidate) => {
+    const ids = new Set(captureGroupDesigns(candidate).map((design) => design.id));
+    return ids.size > 1 && ids.has(previousId) && ids.has(nextId);
+  });
+}
+
 function renderCapture(capture: CaptureResult) {
+  const preserveViewport = capturesSharePageGroup(selectedCapture, capture);
   setSelectedHistoryKey(captureSourceKey(capture.sourceUrl));
   selectedCapture = capture;
+  selectedDesignId = currentDesign(capture)?.id || null;
   selectedLayerId = null;
   selectedCommentId = null;
   hitStack = null;
@@ -1631,7 +1924,7 @@ function renderCapture(capture: CaptureResult) {
   updatePlatformPicker(capture);
 
   const designIndex = capture.designs.findIndex((item) => item.error == null && item.localPath != null);
-  const design = designIndex >= 0 ? capture.designs[designIndex] : null;
+  const design = currentDesign(capture) || (designIndex >= 0 ? capture.designs[designIndex] : null);
   const source = design ? localImageSource(design.localPath) : null;
   if (!design || !source) {
     showMcpLinkButton(null);
@@ -1648,9 +1941,11 @@ function renderCapture(capture: CaptureResult) {
   showMcpLinkButton(designMcpTarget(capture, design));
   canvasTitle.textContent = design.name;
   artboardImage.alt = design.name;
-  canvasZoom = 100;
-  canvasPanX = 0;
-  canvasPanY = 0;
+  if (!preserveViewport) {
+    canvasZoom = 100;
+    canvasPanX = 0;
+    canvasPanY = 0;
+  }
   applyCanvasPan();
   if (coordinate) applyCanvasZoom();
   artboardImage.src = source;
@@ -1664,6 +1959,9 @@ function updateCapturedSlices(capture: CaptureResult) {
   history = dedupeHistory([capture, ...history.filter((item) => captureSourceKey(item.sourceUrl) !== key)]);
   if (selectedHistoryKey === key) {
     selectedCapture = capture;
+    if (!capture.designs.some((item) => item.id === selectedDesignId && item.localPath && item.error == null)) {
+      selectedDesignId = currentDesign(capture)?.id || null;
+    }
     renderResultMeta(capture);
     updatePlatformPicker(capture);
     renderSliceOutlines(capture);
@@ -1807,6 +2105,9 @@ function updateLayerCursor(clientX: number, clientY: number) {
 
 function closeDeleteDialog() {
   pendingDeleteCaptureId = null;
+  pendingDeleteDesigns = null;
+  pendingClearCache = false;
+  deleteConfirmTitle.textContent = "删除抓取记录";
   deleteConfirmButton.disabled = false;
   deleteCancelButton.disabled = false;
   deleteConfirmButton.textContent = "删除";
@@ -1816,17 +2117,51 @@ function closeDeleteDialog() {
 }
 
 function requestCaptureDeletion(capture: CaptureResult) {
-  pendingDeleteCaptureId = capture.captureId;
-  deleteConfirmMessage.textContent = `确定删除“${capture.projectName}”及其本地图片吗？`;
+  deleteConfirmTitle.textContent = "删除本地资源";
+  const group = captureGroupDesigns(capture);
+  if (group.length > 1) {
+    pendingDeleteDesigns = {
+      projectId: capture.projectId,
+      designIds: group.map((design) => design.id),
+      title: historyCaptureTitle(capture),
+    };
+    deleteConfirmMessage.textContent = `确定删除文件夹“${historyCaptureTitle(capture)}”及其 ${group.length} 个页面的全部本地资源吗？`;
+  } else {
+    pendingDeleteCaptureId = capture.captureId;
+    deleteConfirmMessage.textContent = `确定删除“${capture.projectName}”及其全部本地资源吗？`;
+  }
   deleteConfirmError.textContent = "";
   deleteConfirmError.classList.add("hidden");
   deleteConfirmDialog.showModal();
   deleteConfirmDialog.focus({ preventScroll: true });
 }
 
+function requestDesignDeletion(projectId: string, designId: string, title: string) {
+  deleteConfirmTitle.textContent = "删除页面资源";
+  pendingDeleteDesigns = { projectId, designIds: [designId], title };
+  deleteConfirmMessage.textContent = `确定删除页面“${title}”及其全部本地资源吗？`;
+  deleteConfirmError.textContent = "";
+  deleteConfirmError.classList.add("hidden");
+  deleteConfirmDialog.showModal();
+  deleteConfirmDialog.focus({ preventScroll: true });
+}
+
+function requestClearCache() {
+  pendingClearCache = true;
+  deleteConfirmTitle.textContent = "清除全部缓存";
+  deleteConfirmMessage.textContent = "确定清除所有页面的原图、切图、导出文件和图层缓存吗？抓取记录与页面分组会保留，所有页面将恢复为未加载状态。";
+  deleteConfirmError.textContent = "";
+  deleteConfirmError.classList.add("hidden");
+  deleteConfirmButton.textContent = "确认清除";
+  deleteConfirmDialog.showModal();
+  deleteConfirmDialog.focus({ preventScroll: true });
+}
+
 async function confirmCaptureDeletion() {
   const capture = history.find((item) => item.captureId === pendingDeleteCaptureId);
-  if (!capture) {
+  const designDeletion = pendingDeleteDesigns;
+  const clearCache = pendingClearCache;
+  if (!capture && !designDeletion && !clearCache) {
     closeDeleteDialog();
     return;
   }
@@ -1835,11 +2170,27 @@ async function confirmCaptureDeletion() {
   deleteCancelButton.disabled = true;
   deleteConfirmButton.textContent = "删除中…";
   try {
-    await invoke("delete_saved_capture", { captureId: capture.captureId });
-    const deletedSelected = selectedCapture?.captureId === capture.captureId;
-    history = history.filter((item) => item.captureId !== capture.captureId);
+    const deletedSelected = clearCache || (designDeletion
+      ? Boolean(currentDesign(selectedCapture)?.id && designDeletion.designIds.includes(currentDesign(selectedCapture)!.id))
+      : selectedCapture?.captureId === capture!.captureId);
+    if (clearCache) {
+      await invoke("clear_saved_design_cache");
+    } else if (designDeletion) {
+      await invoke("delete_saved_designs", { request: designDeletion });
+    } else {
+      await invoke("delete_saved_capture", { captureId: capture!.captureId });
+    }
+    history = dedupeHistory(await invoke<CaptureResult[]>("list_saved_captures"));
     closeDeleteDialog();
-    if (deletedSelected) {
+    const remainingGroup = designDeletion && designDeletion.designIds.length === 1
+      ? history.find((item) =>
+          item.projectId === designDeletion.projectId &&
+          captureGroupDesigns(item).some((design) => pageGroupKey(design.name) === pageGroupKey(designDeletion.title)),
+        )
+      : null;
+    if (remainingGroup) {
+      renderCapture(remainingGroup);
+    } else if (deletedSelected) {
       const next = historyEntries()[0];
       if (next?.capture) renderCapture(next.capture);
       else if (next?.attempt) renderCaptureAttempt(next.attempt);
@@ -1847,7 +2198,7 @@ async function confirmCaptureDeletion() {
     } else {
       renderHistory();
     }
-    setStatus("记录已删除", "success");
+    setStatus(clearCache ? "缓存已清除" : designDeletion ? "页面资源已删除" : "记录已删除", "success");
   } catch (error) {
     deleteConfirmButton.disabled = false;
     deleteConfirmButton.textContent = "重新删除";
@@ -1993,6 +2344,7 @@ captureForm.addEventListener("submit", (event) => {
 });
 
 installPluginButton.addEventListener("click", () => void installCodexPlugin());
+clearCacheButton.addEventListener("click", requestClearCache);
 installBrowserExtensionButton.addEventListener("click", () => void installBrowserExtension());
 captureMethodButtons.forEach((button) => {
   button.addEventListener("click", () => {
@@ -2033,6 +2385,15 @@ cancelButton.addEventListener("click", async () => {
 });
 
 historyList.addEventListener("click", (event) => {
+  const designDeleteTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-delete-design-id]");
+  if (designDeleteTarget) {
+    const designId = designDeleteTarget.dataset.deleteDesignId;
+    const projectId = designDeleteTarget.dataset.deleteDesignProject;
+    const title = designDeleteTarget.dataset.deleteDesignTitle;
+    if (designId && projectId && title) requestDesignDeletion(projectId, designId, title);
+    return;
+  }
+
   const deleteTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-delete-capture-id]");
   if (deleteTarget) {
     const capture = history.find((item) => item.captureId === deleteTarget.dataset.deleteCaptureId);
@@ -2050,12 +2411,30 @@ historyList.addEventListener("click", (event) => {
     return;
   }
 
+  const childTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-history-design-id]");
+  if (childTarget) {
+    const groupKey = childTarget.dataset.historyGroupKey;
+    const designId = childTarget.dataset.historyDesignId;
+    const group = history.find((item) => captureSourceKey(item.sourceUrl) === groupKey);
+    if (group && designId) {
+      if (selectedCapture?.captureId !== group.captureId) renderCapture(group);
+      selectDesignPage(designId);
+    }
+    return;
+  }
+
   const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-select-history-key]");
   if (!target) return;
   const key = target.dataset.selectHistoryKey;
   const capture = history.find((item) => captureSourceKey(item.sourceUrl) === key);
   const attempt = captureAttempts.find((item) => item.key === key);
-  if (capture) renderCapture(capture);
+  if (capture) {
+    if (captureGroupDesigns(capture).length > 1) {
+      if (expandedHistoryGroups.has(key!)) expandedHistoryGroups.delete(key!);
+      else expandedHistoryGroups.add(key!);
+    }
+    renderCapture(capture);
+  }
   else if (attempt) renderCaptureAttempt(attempt);
 });
 
@@ -2161,7 +2540,7 @@ commentMarkers.addEventListener("click", (event) => {
 
 artboardImage.addEventListener("load", () => {
   if (!selectedCapture) return;
-  const design = selectedCapture.designs.find((item) => item.localPath && item.error == null);
+  const design = currentDesign(selectedCapture);
   if (!design) return;
   if (design.width == null || design.height == null) {
     design.width = artboardImage.naturalWidth;
