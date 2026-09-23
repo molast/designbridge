@@ -870,6 +870,24 @@ function setStatus(label: string, tone: "idle" | "working" | "success" | "error"
   appStatus.title = label;
 }
 
+function renderCodexMcpStatus(available: boolean) {
+  installPluginButton.disabled = available;
+  installPluginButton.textContent = available ? "MCP 服务可用" : "安装 Codex 插件";
+  installPluginButton.classList.toggle("is-ready", available);
+  installPluginButton.title = available
+    ? "DesignBridge MCP 已注册并可由 Codex 启动"
+    : "安装 DesignBridge Codex 插件和 MCP 服务";
+}
+
+async function refreshCodexMcpStatus() {
+  try {
+    renderCodexMcpStatus(await invoke<boolean>("codex_mcp_status"));
+  } catch (error) {
+    console.warn("Codex MCP 状态检测失败", error);
+    renderCodexMcpStatus(false);
+  }
+}
+
 async function installCodexPlugin() {
   installPluginButton.disabled = true;
   installPluginButton.textContent = "正在安装…";
@@ -878,14 +896,16 @@ async function installCodexPlugin() {
 
   try {
     await invoke<string>("install_codex_plugin");
-    installPluginButton.textContent = "插件与 MCP 已安装";
+    await refreshCodexMcpStatus();
     setStatus("安装完成，请完全退出并重新打开 Codex，然后新建任务", "success");
   } catch (error) {
     installPluginButton.textContent = "安装失败，重试";
     setStatus("插件安装失败", "error");
     showError(String(error));
   } finally {
-    installPluginButton.disabled = false;
+    if (!installPluginButton.classList.contains("is-ready")) {
+      installPluginButton.disabled = false;
+    }
   }
 }
 
@@ -3006,6 +3026,8 @@ async function initialize() {
     console.warn("浏览器插件状态检测失败", error);
     renderBrowserExtensionStatus(null);
   }
+
+  await refreshCodexMcpStatus();
 
   window.setInterval(() => {
     if (captureMethod !== "browser") return;

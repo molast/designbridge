@@ -247,6 +247,13 @@ button:disabled {
   opacity: 0.65;
 }
 
+.topbar-actions .plugin-install-button.is-ready {
+  color: #2f7a45;
+  border-color: #a9c9b0;
+  background: #f1f8f2;
+  opacity: 1;
+}
+
 .confirm-dialog.browser-extension-dialog {
   width: min(480px, calc(100vw - 40px));
 }
@@ -684,9 +691,9 @@ button:disabled {
   width: 100%;
   height: 100%;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr);
+  grid-template-columns: 42px minmax(0, 1fr);
   align-items: center;
-  gap: 9px;
+  gap: 11px;
   padding: 7px 40px 7px 9px;
   text-align: left;
   color: var(--text);
@@ -786,11 +793,11 @@ button:disabled {
 }
 
 .history-group-leading {
-  width: 30px;
+  width: 42px;
   display: grid;
-  grid-template-columns: 8px 1fr;
+  grid-template-columns: 14px 20px;
   align-items: center;
-  gap: 3px;
+  gap: 6px;
 }
 
 .history-group-chevron {
