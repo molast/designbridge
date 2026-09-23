@@ -339,6 +339,7 @@ struct LanhuRoute {
     project_id: Option<String>,
     image_id: Option<String>,
     child: Option<String>,
+    single_page: bool,
 }
 
 fn lanhu_route(url: &Url) -> LanhuRoute {
@@ -355,6 +356,7 @@ fn lanhu_route(url: &Url) -> LanhuRoute {
             "pid" | "project_id" => route.project_id = Some(value.into_owned()),
             "image_id" | "docId" => route.image_id = Some(value.into_owned()),
             "child" => route.child = Some(value.into_owned()),
+            "designbridge_single_page" => route.single_page = value == "1" || value == "true",
             _ => {}
         }
     }
@@ -1834,12 +1836,17 @@ fn layer_frame(value: &serde_json::Value) -> Option<LayerFrame> {
 }
 
 fn radius_value(value: &serde_json::Value) -> Option<LayerRadius> {
-    Some(LayerRadius {
-        top_left: finite_number(value, &["topLeft", "top_left"]).unwrap_or(0.0),
-        top_right: finite_number(value, &["topRight", "top_right"]).unwrap_or(0.0),
-        bottom_right: finite_number(value, &["bottomRight", "bottom_right"]).unwrap_or(0.0),
-        bottom_left: finite_number(value, &["bottomLeft", "bottom_left"]).unwrap_or(0.0),
-    })
+    let radius = LayerRadius {
+        top_left: finite_number(value, &["topLeft", "top_left"]),
+        top_right: finite_number(value, &["topRight", "top_right"]),
+        bottom_right: finite_number(value, &["bottomRight", "bottom_right"]),
+        bottom_left: finite_number(value, &["bottomLeft", "bottom_left"]),
+    };
+    (radius.top_left.is_some()
+        || radius.top_right.is_some()
+        || radius.bottom_right.is_some()
+        || radius.bottom_left.is_some())
+    .then_some(radius)
 }
 
 fn layer_radius(value: &serde_json::Value) -> LayerRadius {
@@ -1847,14 +1854,9 @@ fn layer_radius(value: &serde_json::Value) -> LayerRadius {
         .get("paths")
         .and_then(serde_json::Value::as_array)
         .and_then(|paths| {
-            paths.iter().find_map(|path| {
-                let radius = path.get("radius").and_then(radius_value)?;
-                let has_radius = radius.top_left != 0.0
-                    || radius.top_right != 0.0
-                    || radius.bottom_right != 0.0
-                    || radius.bottom_left != 0.0;
-                has_radius.then_some(radius)
-            })
+            paths
+                .iter()
+                .find_map(|path| path.get("radius").and_then(radius_value))
         });
     path_radius
         .or_else(|| value.get("radius").and_then(radius_value))
@@ -2106,6 +2108,11 @@ fn collect_layers(value: &serde_json::Value) -> Vec<InspectableLayer> {
                     .get("visible")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(true),
+                pass_through: value
+                    .get("isPassThrough")
+                    .or_else(|| value.get("passThrough"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
                 radius: layer_radius(value),
                 fills: layer_paints(value),
                 borders: layer_borders(value),
@@ -2261,6 +2268,29 @@ fn find_array<'a>(
     None
 }
 
+fn find_array_recursive<'a>(
+    value: &'a serde_json::Value,
+    keys: &[&str],
+) -> Option<&'a Vec<serde_json::Value>> {
+    if let Some(array) = find_array(value, keys) {
+        return Some(array);
+    }
+    if let Some(object) = value.as_object() {
+        for child in object.values() {
+            if let Some(array) = find_array_recursive(child, keys) {
+                return Some(array);
+            }
+        }
+    } else if let Some(array) = value.as_array() {
+        for child in array {
+            if let Some(found) = find_array_recursive(child, keys) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn project_from_response(
     value: &serde_json::Value,
     route: &LanhuRoute,
@@ -2279,7 +2309,10 @@ fn project_from_response(
         if let Some(design) = candidate {
             designs.push(design);
         }
-    } else if let Some(array) = find_array(data, &["images", "designs", "items", "list"]) {
+    } else if let Some(array) = find_array_recursive(
+        data,
+        &["images", "designs", "items", "list", "pages", "children"],
+    ) {
         designs.extend(
             array
                 .iter()
@@ -2512,26 +2545,45 @@ async fn fetch_lanhu_project(
     let response = request_lanhu_json(&client, endpoint).await?;
     let mut project = project_from_response(&response, route, source_url)?;
 
-    // Editor links include both `image_id` and `child`. The image endpoint is
-    // needed for the selected page's layers, while the project endpoint gives
-    // us the sibling page metadata without downloading their bitmaps.
-    if route.image_id.is_some() && route.child.is_some() {
+    // The image endpoint is needed for the selected page's layers, while the
+    // project endpoint gives us sibling page metadata without downloading
+    // their bitmaps. Some editor links omit `child`, so image_id alone is
+    // enough to trigger this second request.
+    // An editor link may omit `child` (for example `type=set`) while still
+    // pointing at one page. Always request the project image list so sibling
+    // pages are available in that case as well.
+    if route.image_id.is_some() && !route.single_page {
         let mut pages_route = route.clone();
         pages_route.image_id = None;
-        if let Ok(pages_response) = request_lanhu_json(&client, api_url(&pages_route)?).await {
-            if let Ok(pages_project) = project_from_response(&pages_response, &pages_route, source_url) {
-                let selected_id = route.image_id.as_deref().unwrap_or_default();
-                let selected_design = project.designs.into_iter().find(|design| design.id == selected_id);
-                let mut designs = pages_project.designs;
-                if let Some(selected_design) = selected_design {
-                    if let Some(position) = designs.iter().position(|design| design.id == selected_id) {
-                        designs[position] = selected_design;
-                    } else {
-                        designs.push(selected_design);
+        let mut pages_project = request_lanhu_json(&client, api_url(&pages_route)?).await
+            .ok()
+            .and_then(|response| project_from_response(&response, &pages_route, source_url).ok());
+        // Some Lanhu responses scope the child route to one page. Retry the
+        // project-wide list without child only when the first result is empty
+        // or single-page, preserving the normal child-scoped result otherwise.
+        if pages_project.as_ref().map(|value| value.designs.len()).unwrap_or(0) <= 1 {
+            let mut broad_pages_route = pages_route.clone();
+            broad_pages_route.child = None;
+            if let Ok(response) = request_lanhu_json(&client, api_url(&broad_pages_route)?).await {
+                if let Ok(candidate) = project_from_response(&response, &broad_pages_route, source_url) {
+                    if candidate.designs.len() > pages_project.as_ref().map(|value| value.designs.len()).unwrap_or(0) {
+                        pages_project = Some(candidate);
                     }
                 }
-                project.designs = designs;
             }
+        }
+        if let Some(pages_project) = pages_project {
+            let selected_id = route.image_id.as_deref().unwrap_or_default();
+            let selected_design = project.designs.into_iter().find(|design| design.id == selected_id);
+            let mut designs = pages_project.designs;
+            if let Some(selected_design) = selected_design {
+                if let Some(position) = designs.iter().position(|design| design.id == selected_id) {
+                    designs[position] = selected_design;
+                } else {
+                    designs.push(selected_design);
+                }
+            }
+            project.designs = designs;
         }
     }
 
@@ -2745,6 +2797,26 @@ fn captured_design_metadata(design: &LanhuDesignPayload) -> CapturedDesign {
         remote_url: design.url.clone(),
         local_path: None,
         error: None,
+    }
+}
+
+fn failed_design_count(designs: &[CapturedDesign]) -> usize {
+    designs.iter().filter(|design| design.error.is_some()).count()
+}
+
+fn normalize_legacy_layer_radius(layers: &mut [InspectableLayer]) {
+    for layer in layers {
+        let all_zero = [
+            layer.radius.top_left,
+            layer.radius.top_right,
+            layer.radius.bottom_right,
+            layer.radius.bottom_left,
+        ]
+        .into_iter()
+        .all(|value| value == Some(0.0));
+        if all_zero {
+            layer.radius = LayerRadius::default();
+        }
     }
 }
 
@@ -3101,7 +3173,9 @@ async fn persist_project(
         .iter()
         .filter(|design| design.local_path.is_some())
         .count();
-    let failed_count = designs.len().saturating_sub(downloaded_count);
+    // Pages after the first one are intentionally metadata-only for multi-page
+    // captures and are loaded on demand. They are not failed downloads.
+    let failed_count = failed_design_count(&designs);
     let slice_total_count = pending_slices.len();
     let captured_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3175,8 +3249,8 @@ fn start_lanhu_capture(
         WebviewUrl::External(parsed_url.clone()),
     )
     .title("蓝湖授权与抓取")
-    .inner_size(1160.0, 780.0)
-    .min_inner_size(820.0, 600.0)
+    .inner_size(900.0, 620.0)
+    .min_inner_size(700.0, 480.0)
     .center()
     .initialization_script(capture_script(&capture_id))
     .on_document_title_changed(move |window, title| {
@@ -3257,6 +3331,10 @@ async fn list_saved_captures(app: tauri::AppHandle) -> Result<Vec<CaptureResult>
         };
         if let Ok(mut capture) = serde_json::from_slice::<CaptureResult>(&bytes) {
             normalize_legacy_layer_frames(&mut capture.layers);
+            normalize_legacy_layer_radius(&mut capture.layers);
+            // Older captures treated metadata-only sibling pages as failures.
+            // Recompute from the actual per-page error field when loading them.
+            capture.failed_count = failed_design_count(&capture.designs);
             captures.push(capture);
         }
     }
@@ -4454,6 +4532,7 @@ mod tests {
             opacity: 1.0,
             rotation: 180.0,
             visible: true,
+            pass_through: false,
             radius: LayerRadius::default(),
             fills: Vec::new(),
             borders: Vec::new(),
@@ -4517,12 +4596,34 @@ mod tests {
         assert_eq!(layers[1].frame.as_ref().unwrap().x, 221.0);
         assert_eq!(layers[1].frame.as_ref().unwrap().y, 138.0);
         assert!(!layers[1].frame_is_visual);
-        assert_eq!(layers[1].radius.top_left, 20.0);
+        assert_eq!(layers[1].radius.top_left, Some(20.0));
         assert_eq!(layers[1].fills[0].token.as_deref(), Some("sys/bg/bg-1"));
         assert_eq!(
             layers[1].fills[0].color.as_deref(),
             Some("rgba(245,245,245,1)")
         );
+    }
+
+    #[test]
+    fn keeps_only_radius_fields_present_in_json() {
+        let design_json = serde_json::json!({
+            "artboard": {
+                "id": "root",
+                "frame": {"left": 0, "top": 0, "width": 100, "height": 100},
+                "layers": [{
+                    "id": "layer",
+                    "frame": {"left": 0, "top": 0, "width": 100, "height": 100},
+                    "radius": {"topLeft": 0},
+                    "layers": []
+                }]
+            }
+        });
+
+        let layers = collect_layers(&design_json);
+        assert_eq!(layers[1].radius.top_left, Some(0.0));
+        assert_eq!(layers[1].radius.top_right, None);
+        assert_eq!(layers[1].radius.bottom_right, None);
+        assert_eq!(layers[1].radius.bottom_left, None);
     }
 
     #[test]
@@ -4635,6 +4736,33 @@ mod tests {
         let visible =
             DynamicImage::ImageRgba8(RgbaImage::from_pixel(20, 12, Rgba([255, 255, 255, 255])));
         assert!(!should_skip_slice(&visible));
+    }
+
+    #[test]
+    fn counts_only_actual_design_download_errors() {
+        fn design(local_path: Option<&str>, error: Option<&str>) -> CapturedDesign {
+            CapturedDesign {
+                id: "design".to_string(),
+                name: "Design".to_string(),
+                width: Some(100.0),
+                height: Some(100.0),
+                coordinate_space: None,
+                update_time: None,
+                has_comment: false,
+                comments: Vec::new(),
+                remote_url: "https://example.com/design.png".to_string(),
+                local_path: local_path.map(str::to_string),
+                error: error.map(str::to_string),
+            }
+        }
+
+        let designs = vec![
+            design(Some("/tmp/design.png"), None),
+            design(None, None), // metadata-only sibling page, loaded on demand
+            design(None, Some("download failed")),
+        ];
+
+        assert_eq!(failed_design_count(&designs), 1);
     }
 
     #[test]

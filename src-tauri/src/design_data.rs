@@ -97,10 +97,14 @@ impl LayerFrame {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LayerRadius {
-    pub top_left: f64,
-    pub top_right: f64,
-    pub bottom_right: f64,
-    pub bottom_left: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_left: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_right: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom_right: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom_left: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -192,6 +196,8 @@ pub struct InspectableLayer {
     pub opacity: f64,
     pub rotation: f64,
     pub visible: bool,
+    #[serde(default)]
+    pub pass_through: bool,
     pub radius: LayerRadius,
     pub fills: Vec<LayerPaint>,
     pub borders: Vec<LayerBorder>,

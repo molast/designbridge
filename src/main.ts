@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ChevronDown, ChevronRight, Folder, Image as ImageIcon, type LucideIcon } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, Image as ImageIcon, RefreshCw, type LucideIcon } from "lucide-react";
 import { mountPhotoPreview, showPhotoPreview, type PreviewItem } from "./photo-preview";
 import {
   mountPlatformPicker,
@@ -125,10 +125,10 @@ type LayerFrame = {
 };
 
 type LayerRadius = {
-  topLeft: number;
-  topRight: number;
-  bottomRight: number;
-  bottomLeft: number;
+  topLeft?: number;
+  topRight?: number;
+  bottomRight?: number;
+  bottomLeft?: number;
 };
 
 type LayerPaint = {
@@ -203,6 +203,7 @@ type InspectableLayer = {
   opacity: number;
   rotation: number;
   visible: boolean;
+  passThrough?: boolean;
   radius: LayerRadius;
   fills: LayerPaint[];
   borders: LayerBorder[];
@@ -291,7 +292,9 @@ const sliceOutlines = document.querySelector<HTMLElement>("#slice-outlines")!;
 const commentMarkers = document.querySelector<HTMLElement>("#comment-markers")!;
 const commentPopover = document.querySelector<HTMLElement>("#comment-popover")!;
 const layerHighlight = document.querySelector<HTMLElement>("#layer-highlight")!;
-const layerHighlightSize = document.querySelector<HTMLElement>("#layer-highlight-size")!;
+const layerHighlightWidth = document.querySelector<HTMLElement>("#layer-highlight-width")!;
+const layerHighlightHeight = document.querySelector<HTMLElement>("#layer-highlight-height")!;
+const layerMeasurements = document.querySelector<HTMLElement>("#layer-measurements")!;
 const layerDetails = document.querySelector<HTMLElement>("#layer-details")!;
 const sliceExportRoot = document.querySelector<HTMLElement>("#slice-export-root")!;
 const deleteConfirmDialog = document.querySelector<HTMLDialogElement>("#delete-confirm-dialog")!;
@@ -316,10 +319,12 @@ const replacementCaptureIds = new Map<string, string>();
 let selectedCapture: CaptureResult | null = null;
 let selectedLayerId: string | null = null;
 let selectedCommentId: string | null = null;
+let hoveredLayerId: string | null = null;
 let selectedDesignId: string | null = null;
+let pendingDesignSelection: { id: string; name: string } | null = null;
+let preserveViewportOnNextRender = false;
 let pageGroupCollapsed = false;
 const expandedHistoryGroups = new Set<string>();
-const pageGroupOrders = new Map<string, string[]>();
 let selectedPlatform: TargetPlatform = "android";
 let hitStack: { captureId: string; x: number; y: number; layerIds: string[]; index: number } | null = null;
 let panState: {
@@ -430,14 +435,26 @@ function captureSourceKey(sourceUrl: string): string {
 
     const projectId = params.get("project_id") || params.get("pid");
     const imageId = params.get("image_id");
-    if (projectId && imageId) return `lanhu:${projectId.toLowerCase()}:${imageId.toLowerCase()}`;
-    if (imageId) return `lanhu:image:${imageId.toLowerCase()}`;
+    const singlePageSuffix = params.get("designbridge_single_page") === "1" ? ":single" : "";
+    if (projectId && imageId) return `lanhu:${projectId.toLowerCase()}:${imageId.toLowerCase()}${singlePageSuffix}`;
+    if (imageId) return `lanhu:image:${imageId.toLowerCase()}${singlePageSuffix}`;
 
     url.hostname = url.hostname.toLowerCase();
     url.searchParams.delete("fromEditor");
     return `url:${url.toString()}`;
   } catch {
     return `url:${sourceUrl.trim()}`;
+  }
+}
+
+function isSinglePageSource(sourceUrl: string): boolean {
+  try {
+    const url = new URL(sourceUrl);
+    const hashQueryIndex = url.hash.indexOf("?");
+    const params = new URLSearchParams(hashQueryIndex >= 0 ? url.hash.slice(hashQueryIndex + 1) : url.search);
+    return params.get("designbridge_single_page") === "1";
+  } catch {
+    return false;
   }
 }
 
@@ -647,24 +664,28 @@ function currentDesign(capture: CaptureResult | null = selectedCapture): Capture
   return selected || capture.designs.find((item) => item.localPath && item.error == null) || null;
 }
 
-function selectDesignPage(designId: string) {
-  if (!selectedCapture || selectedDesignId === designId) return;
-  const design = groupedDesigns(selectedCapture).find((item) => item.id === designId && item.error == null);
+function selectDesignPage(designId: string, designName?: string) {
+  if (!selectedCapture) return;
+  const matches = (item: CapturedDesign) => item.id === designId && (!designName || item.name === designName);
+  const selectedDesign = selectedCapture.designs.find(matches);
+  if (selectedDesignId === designId && selectedDesign?.localPath) return;
+  const design = displayedHistoryDesigns(selectedCapture).find((item) => matches(item) && item.error == null);
   if (!design) return;
   const cachedCapture = history.find((capture) =>
     capture.captureId !== selectedCapture?.captureId && capture.designs.some(
-      (item) => item.id === designId && item.localPath && item.error == null,
+      (item) => matches(item) && item.localPath && item.error == null,
     ),
   );
   if (cachedCapture) {
     selectedDesignId = designId;
+    preserveViewportOnNextRender = true;
     renderCapture(cachedCapture);
     return;
   }
   if (!design.localPath) {
     const cached = history
       .flatMap((capture) => capture.designs)
-      .find((item) => item.id === design.id && item.localPath && item.error == null);
+      .find((item) => item.id === design.id && item.name === design.name && item.localPath && item.error == null);
     if (cached?.localPath) {
       design.localPath = cached.localPath;
       design.width = cached.width;
@@ -674,14 +695,23 @@ function selectDesignPage(designId: string) {
     }
   }
   if (!design.localPath) {
-    const pageUrl = designPageUrl(selectedCapture.sourceUrl, design.id);
-    if (pageUrl) void startCapture(pageUrl);
+    const sourceCapture = history.find((candidate) =>
+      candidate.projectId === selectedCapture?.projectId
+      && candidate.designs.some((item) => item.id === design.id && item.name === design.name),
+    );
+    const pageUrl = designPageUrl(sourceCapture?.sourceUrl || selectedCapture.sourceUrl, design.id);
+    if (pageUrl) {
+      pendingDesignSelection = { id: design.id, name: design.name };
+      void startCapture(pageUrl, { force: true });
+    }
     return;
   }
   selectedDesignId = design.id;
   selectedLayerId = null;
   selectedCommentId = null;
+  hoveredLayerId = null;
   hitStack = null;
+  renderLayerMeasurements();
   commentPopover.classList.add("hidden");
   commentPopover.replaceChildren();
   renderPageList(selectedCapture);
@@ -705,6 +735,7 @@ function designPageUrl(sourceUrl: string, designId: string): string | null {
     const params = new URLSearchParams(hashQueryIndex >= 0 ? url.hash.slice(hashQueryIndex + 1) : url.search);
     params.set("image_id", designId);
     params.delete("child");
+    params.set("designbridge_single_page", "1");
     if (hashQueryIndex >= 0) {
       url.hash = `${url.hash.slice(0, hashQueryIndex + 1)}${params.toString()}`;
     } else {
@@ -1073,7 +1104,7 @@ function beginBrowserCapture(request: BrowserCaptureRequested) {
   setCaptureMethod("browser");
   const key = captureSourceKey(request.sourceUrl);
   const existingCapture = history.find((capture) => captureSourceKey(capture.sourceUrl) === key);
-  if (existingCapture) replacementCaptureIds.set(key, existingCapture.captureId);
+  if (existingCapture && !isSinglePageSource(request.sourceUrl)) replacementCaptureIds.set(key, existingCapture.captureId);
 
   let attempt = captureAttempts.find((item) => item.key === key);
   if (!attempt) {
@@ -1228,14 +1259,22 @@ function renderHistory() {
             aria-label="删除 ${escapeHtml(historyCaptureTitle(entry.capture))}"
             title="删除抓取记录"
           >×</button>
+          <button
+            class="history-refresh"
+            type="button"
+            data-refresh-history-key="${escapeHtml(entry.key)}"
+            aria-label="刷新 ${escapeHtml(historyCaptureTitle(entry.capture))}"
+            title="刷新页面列表"
+          >${iconMarkup(RefreshCw, "history-refresh-icon")}</button>
         </div>
-        ${captureGroupDesigns(entry.capture).length > 1 && expandedHistoryGroups.has(entry.key) ? `
+        ${displayedHistoryDesigns(entry.capture).length > 1 && expandedHistoryGroups.has(entry.key) ? `
           <div class="history-group-children" role="group" aria-label="${escapeHtml(historyCaptureTitle(entry.capture))} 页面">
-            ${stablePageGroupOrder(entry.capture, captureGroupDesigns(entry.capture)).map((design) => `
+            ${displayedHistoryDesigns(entry.capture).map((design) => `
               <div class="history-group-child-row">
                 <button class="history-group-child${design.id === currentDesign(selectedCapture)?.id ? " is-active" : ""}"
                   type="button" data-history-group-key="${escapeHtml(entry.key)}"
-                  data-history-design-id="${escapeHtml(design.id)}">
+                  data-history-design-id="${escapeHtml(design.id)}"
+                  data-history-design-name="${escapeHtml(design.name)}">
                   ${iconMarkup(ImageIcon, "history-page-icon")}
                   <span>${escapeHtml(design.name)}</span>
                   ${isDesignDownloaded(design) ? '<span class="history-child-check" aria-label="已下载">&#10003;</span>' : ""}
@@ -1281,7 +1320,7 @@ function renderHistory() {
 }
 
 function renderPageList(capture: CaptureResult | null) {
-  const designs = groupedDesigns(capture);
+  const designs = capture ? displayedHistoryDesigns(capture) : [];
   sidebar.classList.remove("is-page-navigation");
   pageListPanel.classList.add("hidden");
   renderCanvasPageRail(designs);
@@ -1295,7 +1334,7 @@ function renderPageList(capture: CaptureResult | null) {
   pageList.innerHTML = designs.map((design, index) => `
     <button class="page-list-item${design.id === selectedDesignId ? " is-active" : ""}"
       type="button" role="tab" aria-selected="${design.id === selectedDesignId}"
-      data-select-design-id="${escapeHtml(design.id)}" title="${escapeHtml(design.name)}">
+      data-select-design-id="${escapeHtml(design.id)}" data-select-design-name="${escapeHtml(design.name)}" title="${escapeHtml(design.name)}">
       <span class="page-list-index">${index + 1}</span>
       <span class="page-list-name">${escapeHtml(design.name || `页面 ${index + 1}`)}</span>
       ${isDesignDownloaded(design) ? '<span class="page-list-status" aria-label="已下载">&#10003;</span>' : '<span class="page-list-status is-pending" aria-label="未下载"></span>'}
@@ -1307,7 +1346,7 @@ function renderCanvasPageRail(designs: CapturedDesign[]) {
   canvasPageRail.classList.toggle("hidden", designs.length < 2);
   canvasPageList.innerHTML = designs.map((design) => `
     <button class="canvas-page-item${design.id === selectedDesignId ? " is-active" : ""}"
-      type="button" data-canvas-design-id="${escapeHtml(design.id)}" title="${escapeHtml(design.name)}">
+      type="button" data-canvas-design-id="${escapeHtml(design.id)}" data-canvas-design-name="${escapeHtml(design.name)}" title="${escapeHtml(design.name)}">
       <span>${escapeHtml(design.name)}</span>
       ${isDesignDownloaded(design) ? '<span class="canvas-page-status" aria-label="已下载">&#10003;</span>' : '<span class="canvas-page-status is-pending" aria-label="未下载"></span>'}
     </button>
@@ -1327,42 +1366,33 @@ function pageGroupKey(name: string): string | null {
   return match ? match[1] : null;
 }
 
-function groupedDesigns(capture: CaptureResult | null): CapturedDesign[] {
-  if (!capture) return [];
-  const available = capture.designs.filter((item) => item.error == null);
-  const selected = currentDesign(capture) || available[0];
-  if (!selected) return [];
-  if (available.length === 1) {
-    const navigationGroup = history.find((candidate) =>
-      candidate.captureId !== capture.captureId && captureGroupDesigns(candidate).some((item) => item.id === selected.id),
-    );
-    if (navigationGroup) return stablePageGroupOrder(navigationGroup, captureGroupDesigns(navigationGroup));
+function displayedHistoryDesigns(capture: CaptureResult): CapturedDesign[] {
+  const available = capture.designs.filter((design) => design.error == null);
+  const groupKey = pageGroupKey(available[0]?.name || "");
+  const source = history
+    .filter((candidate) => candidate.projectId === capture.projectId)
+    .map((candidate) => candidate.designs.filter((design) =>
+      design.error == null && (!groupKey || pageGroupKey(design.name) === groupKey),
+    ))
+    .sort((left, right) => right.length - left.length)[0] || available;
+  const seen = new Set<string>();
+  const merged: CapturedDesign[] = [];
+  const append = (designs: CapturedDesign[]) => {
+    for (const design of designs) {
+      const identity = `${design.id}\u0000${design.name}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      merged.push(design);
+    }
+  };
+  append(source);
+  for (const candidate of history) {
+    if (candidate.projectId !== capture.projectId) continue;
+    append(candidate.designs.filter((design) =>
+      design.error == null && (!groupKey || pageGroupKey(design.name) === groupKey),
+    ));
   }
-  const groupKey = pageGroupKey(selected.name);
-  if (!groupKey) return available;
-  const grouped = available.filter((item) => {
-    return pageGroupKey(item.name) === groupKey;
-  });
-  return stablePageGroupOrder(capture, grouped.length > 0 ? grouped : [selected]);
-}
-
-function stablePageGroupOrder(capture: CaptureResult, designs: CapturedDesign[]): CapturedDesign[] {
-  const groupName = pageGroupKey(designs[0]?.name || "") || capture.projectName;
-  const key = `${capture.projectId}:${groupName.toLowerCase()}`;
-  let order = pageGroupOrders.get(key);
-  if (!order) {
-    const earliestGroup = history
-      .filter((candidate) => candidate.projectId === capture.projectId)
-      .sort((a, b) => a.capturedAt - b.capturedAt)
-      .map((candidate) => candidate.designs.filter((design) => pageGroupKey(design.name) === groupName))
-      .find((candidate) => candidate.length > 1);
-    order = (earliestGroup || designs).map((design) => design.id);
-    pageGroupOrders.set(key, order);
-  }
-  const positions = new Map(order.map((id, index) => [id, index]));
-  return [...designs].sort((a, b) =>
-    (positions.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.id) ?? Number.MAX_SAFE_INTEGER),
-  );
+  return merged.length > 0 ? merged : available;
 }
 
 function scrollHistoryEntryIntoView(key: string) {
@@ -1395,6 +1425,7 @@ function renderEmptyCapture(state?: { title: string; detail: string }) {
   selectedDesignId = null;
   selectedLayerId = null;
   selectedCommentId = null;
+  hoveredLayerId = null;
   hitStack = null;
   resultMeta.innerHTML = "";
   designInspector.classList.remove("details-open");
@@ -1420,7 +1451,7 @@ function renderEmptyCapture(state?: { title: string; detail: string }) {
 
 pageList.addEventListener("click", (event) => {
   const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-select-design-id]");
-  if (target?.dataset.selectDesignId) selectDesignPage(target.dataset.selectDesignId);
+  if (target?.dataset.selectDesignId) selectDesignPage(target.dataset.selectDesignId, target.dataset.selectDesignName);
 });
 
 pageListToggle.addEventListener("click", () => {
@@ -1430,7 +1461,7 @@ pageListToggle.addEventListener("click", () => {
 
 canvasPageList.addEventListener("click", (event) => {
   const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-canvas-design-id]");
-  if (target?.dataset.canvasDesignId) selectDesignPage(target.dataset.canvasDesignId);
+  if (target?.dataset.canvasDesignId) selectDesignPage(target.dataset.canvasDesignId, target.dataset.canvasDesignName);
 });
 
 function renderCaptureAttempt(attempt: CaptureAttempt) {
@@ -1442,21 +1473,24 @@ function renderCaptureAttempt(attempt: CaptureAttempt) {
 }
 
 function paintMarkup(paint: LayerPaint): string {
+  const copyValue = paint.color || "";
   return `
-    <div class="style-color-row">
+    <button class="style-color-row style-color-copy-action" type="button" data-copy-color="${escapeHtml(copyValue)}" title="复制颜色值">
       <span class="color-swatch" style="--swatch-color:${safeCssColor(paint.color)}"></span>
       <span class="style-color-copy">
         <strong>${escapeHtml(paint.token || paint.paintType)}</strong>
-        <small>${escapeHtml(colorLabel(paint.color))}${paint.opacity < 1 ? ` · ${Math.round(paint.opacity * 100)}%` : ""}</small>
+        <small>${escapeHtml(colorLabel(paint.color))} · ${escapeHtml(paintOpacityLabel(paint))}</small>
       </span>
-    </div>
+    </button>
   `;
 }
 
-function radiusSummary(radius: LayerRadius): string {
-  const values = [radius.topLeft, radius.topRight, radius.bottomRight, radius.bottomLeft];
-  if (values.every((value) => value === values[0])) return unitValue(values[0]);
-  return values.map(numberValue).join(" / ") + (selectedPlatform === "ios" ? "pt" : "dp");
+function radiusSummary(radius: LayerRadius): string | null {
+  const values = [radius.topLeft, radius.topRight, radius.bottomRight, radius.bottomLeft]
+    .filter((value): value is number => value != null);
+  if (!values.length) return null;
+  const unit = selectedPlatform === "ios" ? "pt" : "dp";
+  return values.map((value) => `${numberValue(value)}${unit}`).join(" ");
 }
 
 function detailRow(label: string, value: string): string {
@@ -1518,6 +1552,42 @@ function colorOpacityLabel(value: string | null): string {
   const rgba = value.match(/^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)$/i);
   if (rgba) return `${Math.round(Number(rgba[1]) * 100)}%`;
   return "100%";
+}
+
+function paintOpacityLabel(paint: LayerPaint): string {
+  const rgba = paint.color?.match(/^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)$/i);
+  const colorOpacity = rgba ? Number(rgba[1]) : 1;
+  return `${Math.round(Math.max(0, Math.min(1, colorOpacity * paint.opacity)) * 100)}%`;
+}
+
+function borderOpacityLabel(border: LayerBorder): string {
+  const rgba = border.color?.match(/^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)$/i);
+  const colorOpacity = rgba ? Number(rgba[1]) : 1;
+  return `${Math.round(Math.max(0, Math.min(1, colorOpacity * border.opacity)) * 100)}%`;
+}
+
+async function copyStyleColor(value: string, target: HTMLButtonElement) {
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+  const previous = target.dataset.copyLabel || target.title;
+  target.dataset.copyLabel = previous;
+  target.title = "复制成功";
+  target.classList.add("is-copied");
+  window.setTimeout(() => {
+    target.title = "复制颜色值";
+    target.classList.remove("is-copied");
+  }, 1200);
 }
 
 function textColorRow(style: LayerTextStyle): string {
@@ -1777,7 +1847,8 @@ function renderLayerSelection() {
       layerHighlight.style.width = `${((right - left) / coordinate.width) * 100}%`;
       layerHighlight.style.height = `${((bottom - top) / coordinate.height) * 100}%`;
       const unit = selectedPlatform === "ios" ? "pt" : "dp";
-      layerHighlightSize.textContent = `${numberValue(layer.frame.width)} × ${numberValue(layer.frame.height)}${unit}`;
+      layerHighlightWidth.textContent = `${numberValue(layer.frame.width)}${unit}`;
+      layerHighlightHeight.textContent = `${numberValue(layer.frame.height)}${unit}`;
       layerHighlight.classList.remove("hidden");
     }
   }
@@ -1805,13 +1876,13 @@ function renderLayerSelection() {
     ? `<div class="style-subsection"><h4>边框</h4>${layer.borders
         .map(
           (border) => `
-            <div class="style-color-row">
+            <button class="style-color-row style-color-copy-action" type="button" data-copy-color="${escapeHtml(border.color || "")}" title="复制颜色值">
               <span class="color-swatch" style="--swatch-color:${safeCssColor(border.color)}"></span>
               <span class="style-color-copy">
                 <strong>${escapeHtml(border.token || colorLabel(border.color))}</strong>
-                <small>${unitValue(border.width)} · ${escapeHtml(border.style)}</small>
+                <small>${unitValue(border.width)} · ${escapeHtml(border.style)} · ${escapeHtml(borderOpacityLabel(border))}</small>
               </span>
-            </div>
+            </button>
           `,
         )
         .join("")}</div>`
@@ -1823,6 +1894,7 @@ function renderLayerSelection() {
     ...layer.blurs.map((blur) => `${blur.blurType} ${numberValue(blur.radius)}dp`),
   ];
   const textStyles = layer.text ? normalizedTextStyles(layer.text) : [];
+  const radius = radiusSummary(layer.radius);
   const text = layer.text
     ? `
       <div class="style-subsection">
@@ -1851,7 +1923,7 @@ function renderLayerSelection() {
         ${frameRows}
         ${detailRow("不透明度", `${Math.round(layer.opacity * 100)}%`)}
         ${layer.rotation !== 0 ? detailRow("旋转", `${numberValue(layer.rotation)}°`) : ""}
-        ${detailRow("圆角", radiusSummary(layer.radius))}
+        ${radius ? detailRow("圆角", radius) : ""}
       </dl>
       ${fills}
       ${borders}
@@ -1888,6 +1960,7 @@ function renderLayerSelection() {
     },
   });
   renderCommentMarkers(capture);
+  renderLayerMeasurements();
 }
 
 function capturesSharePageGroup(previous: CaptureResult | null, next: CaptureResult): boolean {
@@ -1904,13 +1977,16 @@ function capturesSharePageGroup(previous: CaptureResult | null, next: CaptureRes
 }
 
 function renderCapture(capture: CaptureResult) {
-  const preserveViewport = capturesSharePageGroup(selectedCapture, capture);
+  const preserveViewport = preserveViewportOnNextRender || capturesSharePageGroup(selectedCapture, capture);
+  preserveViewportOnNextRender = false;
   setSelectedHistoryKey(captureSourceKey(capture.sourceUrl));
   selectedCapture = capture;
   selectedDesignId = currentDesign(capture)?.id || null;
   selectedLayerId = null;
   selectedCommentId = null;
+  hoveredLayerId = null;
   hitStack = null;
+  renderLayerMeasurements();
   showSliceExportPanel(null);
   designInspector.classList.remove("details-open");
   inspectorDetails.classList.add("hidden");
@@ -1954,6 +2030,62 @@ function renderCapture(capture: CaptureResult) {
   renderLayerSelection();
 }
 
+function renderLayerMeasurements() {
+  layerMeasurements.replaceChildren();
+  layerMeasurements.classList.add("hidden");
+  layerHighlightWidth.classList.remove("hidden");
+  layerHighlightHeight.classList.remove("hidden");
+  if (!selectedCapture || !selectedLayerId || !hoveredLayerId || selectedLayerId === hoveredLayerId) return;
+  const coordinate = currentCoordinate();
+  const selected = captureLayers(selectedCapture).find((layer) => layer.id === selectedLayerId)?.frame;
+  const hovered = captureLayers(selectedCapture).find((layer) => layer.id === hoveredLayerId)?.frame;
+  if (!coordinate || !selected || !hovered) return;
+
+  const items: string[] = [];
+  const unit = selectedPlatform === "ios" ? "pt" : "dp";
+  const addHorizontal = (start: number, end: number, y: number) => {
+    if (end - start <= 0.01) return;
+    items.push(`<span class="layer-measurement horizontal" style="left:${(start / coordinate.width) * 100}%;top:${(y / coordinate.height) * 100}%;width:${((end - start) / coordinate.width) * 100}%"><b>${numberValue(end - start)}${unit}</b></span>`);
+  };
+  const addVertical = (start: number, end: number, x: number) => {
+    if (end - start <= 0.01) return;
+    items.push(`<span class="layer-measurement vertical" style="left:${(x / coordinate.width) * 100}%;top:${(start / coordinate.height) * 100}%;height:${((end - start) / coordinate.height) * 100}%"><b>${numberValue(end - start)}${unit}</b></span>`);
+  };
+  const selectedRight = selected.x + selected.width;
+  const selectedBottom = selected.y + selected.height;
+  const hoveredRight = hovered.x + hovered.width;
+  const hoveredBottom = hovered.y + hovered.height;
+  const overlapY = Math.min(hoveredBottom, selectedBottom) - Math.max(hovered.y, selected.y);
+  const overlapX = Math.min(hoveredRight, selectedRight) - Math.max(hovered.x, selected.x);
+  const horizontalAnchor = overlapY > 0
+    ? Math.max(hovered.y, selected.y) + overlapY / 2
+    : (selected.y + selected.height / 2);
+  const verticalAnchor = overlapX > 0
+    ? Math.max(hovered.x, selected.x) + overlapX / 2
+    : (selected.x + selected.width / 2);
+  if (overlapY > 0) {
+    if (hovered.x < selected.x) addHorizontal(hovered.x, selected.x, horizontalAnchor);
+    if (hoveredRight > selectedRight) addHorizontal(selectedRight, hoveredRight, horizontalAnchor);
+  } else if (hovered.x >= selectedRight) {
+    addHorizontal(selectedRight, hovered.x, horizontalAnchor);
+  } else if (selected.x >= hoveredRight) {
+    addHorizontal(hoveredRight, selected.x, horizontalAnchor);
+  }
+  if (overlapX > 0) {
+    if (hovered.y < selected.y) addVertical(hovered.y, selected.y, verticalAnchor);
+    if (hoveredBottom > selectedBottom) addVertical(selectedBottom, hoveredBottom, verticalAnchor);
+  } else if (hovered.y >= selectedBottom) {
+    addVertical(selectedBottom, hovered.y, verticalAnchor);
+  } else if (selected.y >= hoveredBottom) {
+    addVertical(hoveredBottom, selected.y, verticalAnchor);
+  }
+  if (!items.length) return;
+  layerMeasurements.innerHTML = items.join("");
+  layerMeasurements.classList.remove("hidden");
+  layerHighlightWidth.classList.add("hidden");
+  layerHighlightHeight.classList.add("hidden");
+}
+
 function updateCapturedSlices(capture: CaptureResult) {
   const key = captureSourceKey(capture.sourceUrl);
   history = dedupeHistory([capture, ...history.filter((item) => captureSourceKey(item.sourceUrl) !== key)]);
@@ -1969,6 +2101,30 @@ function updateCapturedSlices(capture: CaptureResult) {
     renderLayerSelection();
   }
   renderHistory();
+}
+
+function updateSinglePageSlices(capture: CaptureResult): CaptureResult | null {
+  if (!isSinglePageSource(capture.sourceUrl)) return null;
+  const parent = history.find((candidate) =>
+    candidate.captureId !== capture.captureId
+    && candidate.projectId === capture.projectId
+    && captureGroupDesigns(candidate).length > 1,
+  );
+  if (!parent) return null;
+
+  const incoming = capture.designs[0];
+  if (incoming) {
+    const existing = parent.designs.find((design) => design.id === incoming.id && design.name === incoming.name);
+    if (existing) Object.assign(existing, incoming);
+    else parent.designs.push(incoming);
+  }
+  parent.slices = capture.slices;
+  parent.sliceDownloadedCount = capture.sliceDownloadedCount;
+  parent.sliceFailedCount = capture.sliceFailedCount;
+  parent.sliceTotalCount = capture.sliceTotalCount;
+  parent.slicesComplete = capture.slicesComplete;
+  parent.layers = capture.layers;
+  return parent;
 }
 
 function layersAtPoint(capture: CaptureResult, x: number, y: number): InspectableLayer[] {
@@ -2038,6 +2194,40 @@ function selectableLayersAtPoint(capture: CaptureResult, x: number, y: number): 
   return hasMeaningfulLayer ? layers : [];
 }
 
+function isLayerAncestor(capture: CaptureResult, ancestorId: string, layerId: string): boolean {
+  let current = captureLayers(capture).find((layer) => layer.id === layerId);
+  const visited = new Set<string>();
+  while (current?.parentId && !visited.has(current.parentId)) {
+    if (current.parentId === ancestorId) return true;
+    visited.add(current.parentId);
+    current = captureLayers(capture).find((layer) => layer.id === current?.parentId);
+  }
+  return false;
+}
+
+function distanceToFrame(frame: LayerFrame, x: number, y: number): number {
+  const dx = x < frame.x ? frame.x - x : x > frame.x + frame.width ? x - (frame.x + frame.width) : 0;
+  const dy = y < frame.y ? frame.y - y : y > frame.y + frame.height ? y - (frame.y + frame.height) : 0;
+  return Math.hypot(dx, dy);
+}
+
+function colorAlpha(value: string | null): number {
+  if (!value) return 0;
+  const rgba = value.match(/^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)$/i);
+  if (rgba) return Number(rgba[1]);
+  const hex = value.trim().match(/^#([\da-f]{8})$/i);
+  if (hex) return Number.parseInt(hex[1].slice(6), 16) / 255;
+  return 1;
+}
+
+function hasVisibleLayerPaint(layer: InspectableLayer): boolean {
+  if (layer.opacity <= 0) return false;
+  const visibleFill = layer.fills.some((paint) => paint.opacity > 0 && colorAlpha(paint.color) > 0);
+  const visibleBorder = layer.borders.some((border) => border.opacity > 0 && border.width > 0 && colorAlpha(border.color) > 0);
+  const visibleShadow = layer.shadows.some((shadow) => colorAlpha(shadow.color) > 0 && shadow.blur > 0);
+  return visibleFill || visibleBorder || visibleShadow || Boolean(layer.text) || layer.isAsset;
+}
+
 function designPointAt(clientX: number, clientY: number) {
   const capture = selectedCapture;
   if (!capture) return null;
@@ -2067,7 +2257,9 @@ function clearLayerSelection() {
   if (!selectedLayerId && !selectedCommentId && !hitStack) return;
   selectedLayerId = null;
   selectedCommentId = null;
+  hoveredLayerId = null;
   hitStack = null;
+  renderLayerMeasurements();
   renderLayerSelection();
 }
 
@@ -2078,7 +2270,8 @@ function selectLayerAt(clientX: number, clientY: number) {
     return;
   }
 
-  const layerIds = selectableLayersAtPoint(point.capture, point.x, point.y).map((layer) => layer.id);
+  const layers = selectableLayersAtPoint(point.capture, point.x, point.y);
+  const layerIds = layers.map((layer) => layer.id);
   const toleranceX = (point.coordinate.width / point.bounds.width) * 5;
   const toleranceY = (point.coordinate.height / point.bounds.height) * 5;
   const samePoint =
@@ -2097,10 +2290,26 @@ function selectLayerAt(clientX: number, clientY: number) {
 
 function updateLayerCursor(clientX: number, clientY: number) {
   const point = designPointAt(clientX, clientY);
-  const hasLayer = point
-    ? selectableLayersAtPoint(point.capture, point.x, point.y).length > 0
-    : false;
+  const candidates = point ? selectableLayersAtPoint(point.capture, point.x, point.y) : [];
+  const selectedId = selectedLayerId;
+  const hovered = selectedId
+    ? candidates
+        .filter((layer) =>
+          layer.id !== selectedId
+          && !layer.passThrough
+          && hasVisibleLayerPaint(layer)
+          && !isLayerAncestor(point!.capture, layer.id, selectedId),
+        )
+        .sort((left, right) => {
+          const leftDistance = left.frame ? distanceToFrame(left.frame, point!.x, point!.y) : Infinity;
+          const rightDistance = right.frame ? distanceToFrame(right.frame, point!.x, point!.y) : Infinity;
+          return leftDistance - rightDistance || (left.depth - right.depth) || left.order - right.order;
+        })[0] || null
+    : null;
+  hoveredLayerId = hovered?.id || null;
+  const hasLayer = candidates.length > 0;
   artboardImage.classList.toggle("has-layer", hasLayer);
+  renderLayerMeasurements();
 }
 
 function closeDeleteDialog() {
@@ -2120,12 +2329,19 @@ function requestCaptureDeletion(capture: CaptureResult) {
   deleteConfirmTitle.textContent = "删除本地资源";
   const group = captureGroupDesigns(capture);
   if (group.length > 1) {
+    const designIds = new Set<string>();
+    for (const candidate of history) {
+      if (candidate.projectId !== capture.projectId) continue;
+      for (const design of candidate.designs) {
+        designIds.add(design.id);
+      }
+    }
     pendingDeleteDesigns = {
       projectId: capture.projectId,
-      designIds: group.map((design) => design.id),
+      designIds: [...designIds],
       title: historyCaptureTitle(capture),
     };
-    deleteConfirmMessage.textContent = `确定删除文件夹“${historyCaptureTitle(capture)}”及其 ${group.length} 个页面的全部本地资源吗？`;
+    deleteConfirmMessage.textContent = `确定删除文件夹“${historyCaptureTitle(capture)}”及其 ${designIds.size} 个页面的全部本地资源吗？`;
   } else {
     pendingDeleteCaptureId = capture.captureId;
     deleteConfirmMessage.textContent = `确定删除“${capture.projectName}”及其全部本地资源吗？`;
@@ -2254,7 +2470,7 @@ async function startCapture(sourceUrl = urlInput.value.trim(), options: StartCap
     progressPanel.classList.add("hidden");
     return;
   }
-  if (existingCapture) replacementCaptureIds.set(key, existingCapture.captureId);
+  if (existingCapture && !isSinglePageSource(normalizedUrl)) replacementCaptureIds.set(key, existingCapture.captureId);
 
   if (captureMethod === "browser") {
     try {
@@ -2385,6 +2601,13 @@ cancelButton.addEventListener("click", async () => {
 });
 
 historyList.addEventListener("click", (event) => {
+  const refreshTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-refresh-history-key]");
+  if (refreshTarget) {
+    const capture = history.find((item) => captureSourceKey(item.sourceUrl) === refreshTarget.dataset.refreshHistoryKey);
+    if (capture) void startCapture(capture.sourceUrl, { force: true });
+    return;
+  }
+
   const designDeleteTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-delete-design-id]");
   if (designDeleteTarget) {
     const designId = designDeleteTarget.dataset.deleteDesignId;
@@ -2415,10 +2638,11 @@ historyList.addEventListener("click", (event) => {
   if (childTarget) {
     const groupKey = childTarget.dataset.historyGroupKey;
     const designId = childTarget.dataset.historyDesignId;
+    const designName = childTarget.dataset.historyDesignName;
     const group = history.find((item) => captureSourceKey(item.sourceUrl) === groupKey);
     if (group && designId) {
       if (selectedCapture?.captureId !== group.captureId) renderCapture(group);
-      selectDesignPage(designId);
+      selectDesignPage(designId, designName);
     }
     return;
   }
@@ -2516,6 +2740,11 @@ artboardScroll.addEventListener(
 );
 
 layerDetails.addEventListener("click", (event) => {
+  const colorTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-copy-color]");
+  if (colorTarget) {
+    void copyStyleColor(colorTarget.dataset.copyColor || "", colorTarget);
+    return;
+  }
   const target = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-preview-slice-index]");
   if (!target) return;
   const index = Number(target.dataset.previewSliceIndex);
@@ -2609,7 +2838,11 @@ function finishArtboardPointer(event: PointerEvent, cancelled = false) {
 artboardImage.addEventListener("pointerup", (event) => finishArtboardPointer(event));
 artboardImage.addEventListener("pointercancel", (event) => finishArtboardPointer(event, true));
 artboardImage.addEventListener("pointerleave", () => {
-  if (!panState) artboardImage.classList.remove("has-layer");
+  if (!panState) {
+    artboardImage.classList.remove("has-layer");
+    hoveredLayerId = null;
+    renderLayerMeasurements();
+  }
 });
 
 document.addEventListener("pointerdown", (event) => {
@@ -2669,6 +2902,7 @@ async function initialize() {
     );
     if (!attempt) return;
     failCaptureAttempt(attempt.key, payload.message);
+    pendingDesignSelection = null;
     setCapturing(false);
     setStatus("抓取失败", "error");
     showError(payload.message);
@@ -2695,8 +2929,38 @@ async function initialize() {
         percent: 0,
       });
     }
-    history = dedupeHistory([payload, ...history.filter((item) => captureSourceKey(item.sourceUrl) !== key)]);
-    renderCapture(payload);
+    const singlePage = isSinglePageSource(payload.sourceUrl);
+    const parentCapture = singlePage
+      ? history.find((item) =>
+          item.captureId !== payload.captureId
+          && item.projectId === payload.projectId
+          && captureGroupDesigns(item).length > 1,
+        ) || null
+      : null;
+    if (parentCapture && payload.designs.length === 1) {
+      const incoming = payload.designs[0];
+      const existing = parentCapture.designs.find((design) => design.id === incoming.id && design.name === incoming.name);
+      if (existing) Object.assign(existing, incoming);
+      else parentCapture.designs.push(incoming);
+      parentCapture.downloadedCount = parentCapture.designs.filter((design) => design.localPath && design.error == null).length;
+      history = history.filter((item) => item.captureId !== payload.captureId);
+      preserveViewportOnNextRender = true;
+      renderCapture(parentCapture);
+      const pending = pendingDesignSelection;
+      pendingDesignSelection = null;
+      if (pending && pending.id === incoming.id && pending.name === incoming.name) {
+        selectDesignPage(pending.id, pending.name);
+      }
+    } else {
+      const pending = pendingDesignSelection;
+      pendingDesignSelection = null;
+      history = dedupeHistory([payload, ...history.filter((item) => captureSourceKey(item.sourceUrl) !== key)]);
+      if (pending) preserveViewportOnNextRender = true;
+      renderCapture(payload);
+      if (pending && payload.designs.some((design) => design.id === pending.id && design.name === pending.name)) {
+        selectDesignPage(pending.id, pending.name);
+      }
+    }
     scrollHistoryEntryIntoView(key);
     if (replacedCaptureId && replacedCaptureId !== payload.captureId) {
       void invoke("delete_saved_capture", { captureId: replacedCaptureId }).catch((error) => {
@@ -2706,10 +2970,22 @@ async function initialize() {
   });
 
   await listen<CaptureResult>("capture-updated", ({ payload }) => {
-    updateCapturedSlices(payload);
+    const mergedParent = updateSinglePageSlices(payload);
+    if (mergedParent) {
+      if (selectedCapture?.captureId === mergedParent.captureId) {
+        selectedCapture = mergedParent;
+        renderResultMeta(mergedParent);
+        renderSliceOutlines(mergedParent);
+        renderCommentMarkers(mergedParent);
+        renderLayerSelection();
+      }
+      renderHistory();
+    } else {
+      updateCapturedSlices(payload);
+    }
     const isVisibleCapture =
-      selectedCapture?.captureId === payload.captureId &&
-      (!activeCaptureId || activeCaptureId === payload.captureId);
+      (selectedCapture?.captureId === payload.captureId || selectedCapture?.captureId === mergedParent?.captureId) &&
+      (!activeCaptureId || activeCaptureId === payload.captureId || activeCaptureId === mergedParent?.captureId);
     if (!isVisibleCapture) return;
     progressPanel.classList.add("hidden");
     const tone = payload.sliceFailedCount ? "error" : "success";
