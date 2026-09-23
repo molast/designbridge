@@ -109,6 +109,14 @@ button:disabled {
   font-size: 11px;
 }
 
+.brand .build-info {
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .topbar-capture {
   position: relative;
   min-width: 0;

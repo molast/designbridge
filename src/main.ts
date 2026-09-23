@@ -312,6 +312,10 @@ const openBrowserExtensionFolderButton = document.querySelector<HTMLButtonElemen
 const browserExtensionDoneButton = document.querySelector<HTMLButtonElement>("#browser-extension-done-button")!;
 const browserExtensionError = document.querySelector<HTMLElement>("#browser-extension-error")!;
 const previewRoot = document.querySelector<HTMLElement>("#preview-root")!;
+const buildInfo = document.querySelector<HTMLElement>("#build-info")!;
+
+buildInfo.textContent = `v${__APP_VERSION__} · ${__BUILD_MODE__}`;
+buildInfo.dataset.buildMode = __BUILD_MODE__;
 
 const CURRENT_CAPTURE_VERSION = 4;
 let activeCaptureId: string | null = null;

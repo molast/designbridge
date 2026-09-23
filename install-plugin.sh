@@ -53,6 +53,12 @@ if [[ -z "$marketplace_name" || -z "$plugin_dir" ]]; then
   exit 1
 fi
 
+# macOS rejects copied ad-hoc Rust binaries whose signature is invalidated by
+# packaging or a previous copy. Re-sign the installed MCP before Codex starts it.
+if [[ "$(uname -s)" == "Darwin" && -x "$plugin_dir/bin/designbridge-mcp" ]]; then
+  codesign --force --sign - "$plugin_dir/bin/designbridge-mcp" >/dev/null
+fi
+
 plugin_launcher="$plugin_dir/scripts/mcp.sh"
 if [[ ! -x "$plugin_launcher" ]]; then
   echo "DesignBridge MCP 启动脚本不存在或不可执行：$plugin_launcher" >&2

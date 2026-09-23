@@ -14,7 +14,12 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    menu::{Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    ActivationPolicy, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
+use tauri_plugin_opener::OpenerExt;
 use url::{Host, Url};
 
 #[cfg(unix)]
@@ -4299,6 +4304,60 @@ pub fn run() {
         .manage(CaptureRuntime::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            let show_item = MenuItem::with_id(app, "show", "打开主界面", true, None::<&str>)?;
+            let website_item = MenuItem::with_id(app, "website", "打开官方网站", true, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, Some("CmdOrCtrl+Q"))?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &website_item, &separator, &quit_item])?;
+            let app_handle = app.handle().clone();
+            let mut tray = TrayIconBuilder::new()
+                .menu(&tray_menu)
+                .tooltip("DesignBridge");
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray
+                .on_menu_event(move |app, event| match event.id().as_ref() {
+                    "show" => {
+                        let _ = app.set_activation_policy(ActivationPolicy::Regular);
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "website" => {
+                        let _ = app.opener().open_url("https://github.com/molast/designbridge", None::<&str>);
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(move |_tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let _ = app_handle.set_activation_policy(ActivationPolicy::Regular);
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let window_for_close = window.clone();
+                let app_for_close = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = app_for_close.set_activation_policy(ActivationPolicy::Accessory);
+                        let _ = window_for_close.hide();
+                    }
+                });
+            }
             start_browser_extension_listener(app.handle().clone())
                 .map_err(std::io::Error::other)?;
             Ok(())
