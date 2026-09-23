@@ -220,6 +220,8 @@ struct ExportSliceRequest {
 struct DeleteSavedDesignsRequest {
     project_id: String,
     design_ids: Vec<String>,
+    #[serde(default)]
+    delete_capture: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -350,6 +352,7 @@ struct LanhuRoute {
     project_id: Option<String>,
     image_id: Option<String>,
     child: Option<String>,
+    link_type: Option<String>,
     single_page: bool,
 }
 
@@ -368,8 +371,20 @@ fn lanhu_route(url: &Url) -> LanhuRoute {
             "image_id" | "docId" => route.image_id = Some(value.into_owned()),
             "child" => route.child = Some(value.into_owned()),
             "designbridge_single_page" => route.single_page = value == "1" || value == "true",
+            "type" => {
+                if value == "image" {
+                    route.single_page = true;
+                }
+                route.link_type = Some(value.into_owned());
+            }
             _ => {}
         }
+    }
+    if route.image_id.is_some()
+        && route.child.is_none()
+        && !matches!(route.link_type.as_deref(), Some("set" | "sectionImageChange"))
+    {
+        route.single_page = true;
     }
     route
 }
@@ -1410,11 +1425,11 @@ async fn fetch_lanhu_project(
             let selected_design = project.designs.into_iter().find(|design| design.id == selected_id);
             let mut designs = pages_project.designs;
             if let Some(selected_design) = selected_design {
-                if let Some(position) = designs.iter().position(|design| design.id == selected_id) {
-                    designs[position] = selected_design;
-                } else {
-                    designs.push(selected_design);
-                }
+                designs.retain(|design| design.id != selected_id);
+                designs.insert(0, selected_design);
+            } else if let Some(position) = designs.iter().position(|design| design.id == selected_id) {
+                let selected_design = designs.remove(position);
+                designs.insert(0, selected_design);
             }
             project.designs = designs;
         }

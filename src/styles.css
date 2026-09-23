@@ -785,6 +785,22 @@ button:disabled {
   font-weight: 700;
 }
 
+.history-thumbnail-image {
+  width: 30px;
+  height: 30px;
+  display: block;
+  overflow: hidden;
+  background: #e3e6e4;
+  border-radius: 5px;
+}
+
+.history-thumbnail-image img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
 .history-folder-icon {
   width: 20px;
   height: 20px;
@@ -883,6 +899,22 @@ button:disabled {
   height: 20px;
   color: #747b82;
   stroke-width: 1.8;
+}
+
+.history-page-thumbnail {
+  width: 20px;
+  height: 20px;
+  display: block;
+  overflow: hidden;
+  background: #e3e6e4;
+  border-radius: 4px;
+}
+
+.history-page-thumbnail img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
 }
 
 .history-child-check {

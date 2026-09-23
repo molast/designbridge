@@ -314,6 +314,12 @@ const browserExtensionError = document.querySelector<HTMLElement>("#browser-exte
 const previewRoot = document.querySelector<HTMLElement>("#preview-root")!;
 const buildInfo = document.querySelector<HTMLElement>("#build-info")!;
 
+urlInput.addEventListener("focus", () => {
+  window.setTimeout(() => {
+    if (document.activeElement === urlInput) urlInput.select();
+  }, 0);
+});
+
 buildInfo.textContent = `v${__APP_VERSION__} · ${__BUILD_MODE__}`;
 buildInfo.dataset.buildMode = __BUILD_MODE__;
 
@@ -325,6 +331,7 @@ let selectedLayerId: string | null = null;
 let selectedCommentId: string | null = null;
 let hoveredLayerId: string | null = null;
 let selectedDesignId: string | null = null;
+let selectedPageMenuId: string | null = null;
 let pendingDesignSelection: { id: string; name: string } | null = null;
 let preserveViewportOnNextRender = false;
 let pageGroupCollapsed = false;
@@ -347,7 +354,7 @@ let captureAttempts: CaptureAttempt[] = [];
 let activeCaptureKey: string | null = null;
 let selectedHistoryKey: string | null = null;
 let pendingDeleteCaptureId: string | null = null;
-let pendingDeleteDesigns: { projectId: string; designIds: string[]; title: string } | null = null;
+let pendingDeleteDesigns: { projectId: string; designIds: string[]; title: string; deleteCapture?: boolean } | null = null;
 let pendingClearCache = false;
 let inspectorFitFrame = 0;
 let sidebarResizeState: { pointerId: number; startX: number; width: number } | null = null;
@@ -439,7 +446,7 @@ function captureSourceKey(sourceUrl: string): string {
 
     const projectId = params.get("project_id") || params.get("pid");
     const imageId = params.get("image_id");
-    const singlePageSuffix = params.get("designbridge_single_page") === "1" ? ":single" : "";
+    const singlePageSuffix = isSinglePageParams(params) ? ":single" : "";
     if (projectId && imageId) return `lanhu:${projectId.toLowerCase()}:${imageId.toLowerCase()}${singlePageSuffix}`;
     if (imageId) return `lanhu:image:${imageId.toLowerCase()}${singlePageSuffix}`;
 
@@ -456,10 +463,23 @@ function isSinglePageSource(sourceUrl: string): boolean {
     const url = new URL(sourceUrl);
     const hashQueryIndex = url.hash.indexOf("?");
     const params = new URLSearchParams(hashQueryIndex >= 0 ? url.hash.slice(hashQueryIndex + 1) : url.search);
-    return params.get("designbridge_single_page") === "1";
+    return isSinglePageParams(params);
   } catch {
     return false;
   }
+}
+
+function isSinglePageParams(params: URLSearchParams): boolean {
+  const imageId = params.get("image_id");
+  const hasChild = Boolean(params.get("child"));
+  const type = params.get("type");
+  return params.get("designbridge_single_page") === "1"
+    || type === "image"
+    || Boolean(imageId && !hasChild && !isCollectionType(type));
+}
+
+function isCollectionType(type: string | null): boolean {
+  return type === "set" || type === "sectionImageChange";
 }
 
 function designMcpLink(capture: CaptureResult, design: CapturedDesign, nodeId: string | null = null): string {
@@ -660,33 +680,52 @@ function currentCoordinate(): PlatformFrame | null {
   return androidFrame(currentDesign() || undefined);
 }
 
+function pageMenuId(capture: CaptureResult, designId: string): string {
+  const group = captureGroupKey(capture) || captureSourceKey(capture.sourceUrl);
+  return `${capture.projectId}:${group}:${designId}`;
+}
+
+function isSelectedPage(capture: CaptureResult, designId: string): boolean {
+  return selectedPageMenuId === pageMenuId(capture, designId);
+}
+
 function currentDesign(capture: CaptureResult | null = selectedCapture): CapturedDesign | null {
   if (!capture) return null;
-  const selected = selectedDesignId && capture.designs.find(
+  const group = captureGroupDesigns(capture);
+  const selected = selectedDesignId && group.find(
     (item) => item.id === selectedDesignId && item.localPath && item.error == null,
   );
-  return selected || capture.designs.find((item) => item.localPath && item.error == null) || null;
+  return selected || group.find((item) => item.localPath && item.error == null) || null;
 }
 
 function selectDesignPage(designId: string, designName?: string) {
   if (!selectedCapture) return;
   const matches = (item: CapturedDesign) => item.id === designId && (!designName || item.name === designName);
   const selectedDesign = selectedCapture.designs.find(matches);
-  if (selectedDesignId === designId && selectedDesign?.localPath) return;
-  const design = displayedHistoryDesigns(selectedCapture).find((item) => matches(item) && item.error == null);
-  if (!design) return;
-  const cachedCapture = history.find((capture) =>
-    capture.captureId !== selectedCapture?.captureId && capture.designs.some(
-      (item) => matches(item) && item.localPath && item.error == null,
-    ),
-  );
-  if (cachedCapture) {
-    selectedDesignId = designId;
-    preserveViewportOnNextRender = true;
-    renderCapture(cachedCapture);
+  if (selectedDesignId === designId && selectedDesign?.localPath) {
+    selectedPageMenuId = pageMenuId(selectedCapture, designId);
+    renderHistory();
+    renderPageList(selectedCapture);
     return;
   }
+  const design = displayedHistoryDesigns(selectedCapture).find((item) => matches(item) && item.error == null);
+  if (!design) return;
+  // Keep navigation state visible while an uncached page is being fetched.
+  selectedDesignId = designId;
   if (!design.localPath) {
+    const cachedCapture = history.find((capture) =>
+      capture.captureId !== selectedCapture?.captureId && capture.designs.some(
+        (item) => matches(item) && item.localPath && item.error == null,
+      ),
+    );
+    if (cachedCapture) {
+      preserveViewportOnNextRender = true;
+      renderCapture(cachedCapture);
+      selectedPageMenuId = pageMenuId(cachedCapture, designId);
+      renderHistory();
+      renderPageList(cachedCapture);
+      return;
+    }
     const cached = history
       .flatMap((capture) => capture.designs)
       .find((item) => item.id === design.id && item.name === design.name && item.localPath && item.error == null);
@@ -711,6 +750,7 @@ function selectDesignPage(designId: string, designName?: string) {
     return;
   }
   selectedDesignId = design.id;
+  selectedPageMenuId = pageMenuId(selectedCapture, design.id);
   selectedLayerId = null;
   selectedCommentId = null;
   hoveredLayerId = null;
@@ -1222,10 +1262,16 @@ function sourceImageId(sourceUrl: string): string | null {
 function captureGroupDesigns(capture: CaptureResult): CapturedDesign[] {
   const available = capture.designs.filter((item) => item.error == null);
   if (available.length < 2) return available;
-  const groupKey = pageGroupKey(available[0]?.name || "");
+  const groupKey = captureGroupKey(capture, available);
   if (!groupKey) return available;
   const grouped = available.filter((item) => pageGroupKey(item.name) === groupKey);
   return grouped.length > 1 ? grouped : available;
+}
+
+function captureGroupKey(capture: CaptureResult, available = capture.designs.filter((item) => item.error == null)): string | null {
+  const sourceId = sourceImageId(capture.sourceUrl);
+  const anchor = available.find((design) => design.id === sourceId) || available[0];
+  return pageGroupKey(anchor?.name || "");
 }
 
 function historyCaptureTitle(capture: CaptureResult): string {
@@ -1252,6 +1298,30 @@ function attemptName(attempt: CaptureAttempt): string {
   }
 }
 
+function historyThumbnailMarkup(capture: CaptureResult): string {
+  const design = capture.designs.find((item) => item.localPath && item.error == null);
+  const source = design ? localImageSource(design.localPath) : null;
+  if (source) {
+    return `<span class="history-thumbnail-image"><img src="${escapeHtml(source)}" alt="" /></span>`;
+  }
+  return `<span class="history-thumbnail-count">${capture.downloadedCount}</span>`;
+}
+
+function designThumbnailSource(design: CapturedDesign): string | null {
+  const localPath = design.localPath || history
+    .flatMap((capture) => capture.designs)
+    .find((item) => item.id === design.id && item.localPath && item.error == null)?.localPath || null;
+  return localImageSource(localPath);
+}
+
+function pageThumbnailMarkup(design: CapturedDesign | undefined): string {
+  if (!design) return iconMarkup(Folder, "history-folder-icon");
+  const source = designThumbnailSource(design);
+  return source
+    ? `<span class="history-page-thumbnail"><img src="${escapeHtml(source)}" alt="" /></span>`
+    : iconMarkup(ImageIcon, "history-page-icon");
+}
+
 function renderHistory() {
   const entries = historyEntries();
   historyCount.textContent = String(entries.length);
@@ -1267,8 +1337,8 @@ function renderHistory() {
         <div class="history-item${historyCaptureSelected(entry.capture, entry.key) ? " active" : ""}" data-history-key="${escapeHtml(entry.key)}">
           <button class="history-select" type="button" data-select-history-key="${escapeHtml(entry.key)}">
             ${captureGroupDesigns(entry.capture).length > 1
-              ? `<span class="history-group-leading">${iconMarkup(expandedHistoryGroups.has(entry.key) ? ChevronDown : ChevronRight, "history-group-chevron")}${iconMarkup(Folder, "history-folder-icon")}</span>`
-              : `<span class="history-thumbnail-count">${entry.capture.downloadedCount}</span>`}
+              ? `<span class="history-group-leading">${iconMarkup(expandedHistoryGroups.has(entry.key) ? ChevronDown : ChevronRight, "history-group-chevron")}${pageThumbnailMarkup(displayedHistoryDesigns(entry.capture)[0] || captureGroupDesigns(entry.capture)[0])}</span>`
+              : historyThumbnailMarkup(entry.capture)}
             <span class="history-copy">
               <strong>${escapeHtml(historyCaptureTitle(entry.capture))}</strong>
               <span>${captureGroupDesigns(entry.capture).length > 1
@@ -1295,11 +1365,11 @@ function renderHistory() {
           <div class="history-group-children" role="group" aria-label="${escapeHtml(historyCaptureTitle(entry.capture))} 页面">
             ${displayedHistoryDesigns(entry.capture).map((design) => `
               <div class="history-group-child-row">
-                <button class="history-group-child${design.id === currentDesign(selectedCapture)?.id ? " is-active" : ""}"
+                <button class="history-group-child${isSelectedPage(entry.capture, design.id) ? " is-active" : ""}"
                   type="button" data-history-group-key="${escapeHtml(entry.key)}"
                   data-history-design-id="${escapeHtml(design.id)}"
                   data-history-design-name="${escapeHtml(design.name)}">
-                  ${iconMarkup(ImageIcon, "history-page-icon")}
+                  ${pageThumbnailMarkup(design)}
                   <span>${escapeHtml(design.name)}</span>
                   ${isDesignDownloaded(design) ? '<span class="history-child-check" aria-label="已下载">&#10003;</span>' : ""}
                 </button>
@@ -1347,7 +1417,7 @@ function renderPageList(capture: CaptureResult | null) {
   const designs = capture ? displayedHistoryDesigns(capture) : [];
   sidebar.classList.remove("is-page-navigation");
   pageListPanel.classList.add("hidden");
-  renderCanvasPageRail(designs);
+  renderCanvasPageRail(capture, designs);
   if (designs.length < 2) {
     pageList.replaceChildren();
     return;
@@ -1356,8 +1426,8 @@ function renderPageList(capture: CaptureResult | null) {
   pageListToggle.querySelector(".page-list-chevron")!.textContent = pageGroupCollapsed ? "⌄" : "⌃";
   pageList.classList.toggle("is-collapsed", pageGroupCollapsed);
   pageList.innerHTML = designs.map((design, index) => `
-    <button class="page-list-item${design.id === selectedDesignId ? " is-active" : ""}"
-      type="button" role="tab" aria-selected="${design.id === selectedDesignId}"
+    <button class="page-list-item${capture && isSelectedPage(capture, design.id) ? " is-active" : ""}"
+      type="button" role="tab" aria-selected="${capture ? isSelectedPage(capture, design.id) : false}"
       data-select-design-id="${escapeHtml(design.id)}" data-select-design-name="${escapeHtml(design.name)}" title="${escapeHtml(design.name)}">
       <span class="page-list-index">${index + 1}</span>
       <span class="page-list-name">${escapeHtml(design.name || `页面 ${index + 1}`)}</span>
@@ -1366,10 +1436,10 @@ function renderPageList(capture: CaptureResult | null) {
   `).join("");
 }
 
-function renderCanvasPageRail(designs: CapturedDesign[]) {
+function renderCanvasPageRail(capture: CaptureResult | null, designs: CapturedDesign[]) {
   canvasPageRail.classList.toggle("hidden", designs.length < 2);
   canvasPageList.innerHTML = designs.map((design) => `
-    <button class="canvas-page-item${design.id === selectedDesignId ? " is-active" : ""}"
+    <button class="canvas-page-item${capture && isSelectedPage(capture, design.id) ? " is-active" : ""}"
       type="button" data-canvas-design-id="${escapeHtml(design.id)}" data-canvas-design-name="${escapeHtml(design.name)}" title="${escapeHtml(design.name)}">
       <span>${escapeHtml(design.name)}</span>
       ${isDesignDownloaded(design) ? '<span class="canvas-page-status" aria-label="已下载">&#10003;</span>' : '<span class="canvas-page-status is-pending" aria-label="未下载"></span>'}
@@ -1392,7 +1462,8 @@ function pageGroupKey(name: string): string | null {
 
 function displayedHistoryDesigns(capture: CaptureResult): CapturedDesign[] {
   const available = capture.designs.filter((design) => design.error == null);
-  const groupKey = pageGroupKey(available[0]?.name || "");
+  const groupKey = captureGroupKey(capture, available);
+  if (!groupKey) return available;
   const source = history
     .filter((candidate) => candidate.projectId === capture.projectId)
     .map((candidate) => candidate.designs.filter((design) =>
@@ -1447,6 +1518,7 @@ function renderEmptyCapture(state?: { title: string; detail: string }) {
   if (!state) setSelectedHistoryKey(null);
   selectedCapture = null;
   selectedDesignId = null;
+  selectedPageMenuId = null;
   selectedLayerId = null;
   selectedCommentId = null;
   hoveredLayerId = null;
@@ -2005,7 +2077,9 @@ function renderCapture(capture: CaptureResult) {
   preserveViewportOnNextRender = false;
   setSelectedHistoryKey(captureSourceKey(capture.sourceUrl));
   selectedCapture = capture;
-  selectedDesignId = currentDesign(capture)?.id || null;
+  const folderPages = displayedHistoryDesigns(capture);
+  selectedDesignId = folderPages[0]?.id || currentDesign(capture)?.id || null;
+  selectedPageMenuId = selectedDesignId ? pageMenuId(capture, selectedDesignId) : null;
   selectedLayerId = null;
   selectedCommentId = null;
   hoveredLayerId = null;
@@ -2129,14 +2203,19 @@ function updateCapturedSlices(capture: CaptureResult) {
 
 function updateSinglePageSlices(capture: CaptureResult): CaptureResult | null {
   if (!isSinglePageSource(capture.sourceUrl)) return null;
+  const incoming = capture.designs[0];
+  const groupKey = captureGroupKey(capture);
   const parent = history.find((candidate) =>
     candidate.captureId !== capture.captureId
     && candidate.projectId === capture.projectId
-    && captureGroupDesigns(candidate).length > 1,
-  );
+    && captureGroupDesigns(candidate).length > 1
+    && Boolean(
+      (incoming && captureGroupDesigns(candidate).some((design) => design.id === incoming.id))
+      || (groupKey && captureGroupKey(candidate) === groupKey),
+    ),
+  ) || null;
   if (!parent) return null;
 
-  const incoming = capture.designs[0];
   if (incoming) {
     const existing = parent.designs.find((design) => design.id === incoming.id && design.name === incoming.name);
     if (existing) Object.assign(existing, incoming);
@@ -2353,17 +2432,20 @@ function requestCaptureDeletion(capture: CaptureResult) {
   deleteConfirmTitle.textContent = "删除本地资源";
   const group = captureGroupDesigns(capture);
   if (group.length > 1) {
+    const groupKey = captureGroupKey(capture);
     const designIds = new Set<string>();
     for (const candidate of history) {
       if (candidate.projectId !== capture.projectId) continue;
       for (const design of candidate.designs) {
-        designIds.add(design.id);
+        if (design.error != null) continue;
+        if (!groupKey || pageGroupKey(design.name) === groupKey) designIds.add(design.id);
       }
     }
     pendingDeleteDesigns = {
       projectId: capture.projectId,
       designIds: [...designIds],
       title: historyCaptureTitle(capture),
+      deleteCapture: true,
     };
     deleteConfirmMessage.textContent = `确定删除文件夹“${historyCaptureTitle(capture)}”及其 ${designIds.size} 个页面的全部本地资源吗？`;
   } else {
@@ -2378,7 +2460,7 @@ function requestCaptureDeletion(capture: CaptureResult) {
 
 function requestDesignDeletion(projectId: string, designId: string, title: string) {
   deleteConfirmTitle.textContent = "删除页面资源";
-  pendingDeleteDesigns = { projectId, designIds: [designId], title };
+  pendingDeleteDesigns = { projectId, designIds: [designId], title, deleteCapture: false };
   deleteConfirmMessage.textContent = `确定删除页面“${title}”及其全部本地资源吗？`;
   deleteConfirmError.textContent = "";
   deleteConfirmError.classList.add("hidden");
@@ -2663,8 +2745,11 @@ historyList.addEventListener("click", (event) => {
     const groupKey = childTarget.dataset.historyGroupKey;
     const designId = childTarget.dataset.historyDesignId;
     const designName = childTarget.dataset.historyDesignName;
-    const group = history.find((item) => captureSourceKey(item.sourceUrl) === groupKey);
+    const group = history.find((item) =>
+      Boolean(designId && captureGroupDesigns(item).some((design) => design.id === designId)),
+    ) || history.find((item) => captureSourceKey(item.sourceUrl) === groupKey);
     if (group && designId) {
+      selectedDesignId = designId;
       if (selectedCapture?.captureId !== group.captureId) renderCapture(group);
       selectDesignPage(designId, designName);
     }
@@ -2954,11 +3039,17 @@ async function initialize() {
       });
     }
     const singlePage = isSinglePageSource(payload.sourceUrl);
+    const incomingPage = payload.designs[0];
+    const incomingGroupKey = incomingPage ? pageGroupKey(incomingPage.name) : null;
     const parentCapture = singlePage
       ? history.find((item) =>
           item.captureId !== payload.captureId
           && item.projectId === payload.projectId
-          && captureGroupDesigns(item).length > 1,
+          && captureGroupDesigns(item).length > 1
+          && Boolean(
+            (incomingPage && captureGroupDesigns(item).some((design) => design.id === incomingPage.id))
+            || (incomingGroupKey && captureGroupKey(item) === incomingGroupKey),
+          ),
         ) || null
       : null;
     if (parentCapture && payload.designs.length === 1) {

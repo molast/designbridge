@@ -526,6 +526,27 @@
     }
 
     #[test]
+    fn treats_bare_image_links_as_single_pages_but_sets_as_collections() {
+        let page = lanhu_url(
+            "https://lanhuapp.com/web/#/item/project/detailDetach?pid=project&image_id=design",
+        )
+        .unwrap();
+        assert!(lanhu_route(&page).single_page);
+
+        let set = lanhu_url(
+            "https://lanhuapp.com/web/#/item/project/detailDetach?pid=project&image_id=design&type=set",
+        )
+        .unwrap();
+        assert!(!lanhu_route(&set).single_page);
+
+        let section = lanhu_url(
+            "https://lanhuapp.com/web/#/item/project/detailDetach?pid=project&image_id=design&type=sectionImageChange",
+        )
+        .unwrap();
+        assert!(!lanhu_route(&section).single_page);
+    }
+
+    #[test]
     fn reads_optional_browser_capture_id_from_camel_case() {
         let request: BrowserCaptureRequest = serde_json::from_value(serde_json::json!({
             "version": 1,
@@ -587,4 +608,3 @@
         assert_eq!(slices[0].name, "icon/inside/tab-overview-gary");
         assert_eq!(slices[0].url, "https://lanhu-oss-2537-2.lanhuapp.com/FigmaSlicePNG044970105cf846b14bc6ed13f63137b7.png");
     }
-

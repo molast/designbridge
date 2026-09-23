@@ -322,6 +322,12 @@ pub(crate) async fn delete_saved_designs(
         }
 
         capture.designs.retain(|design| !design_ids.contains(&design.id));
+        if request.delete_capture && owns_deleted_resources {
+            tokio::fs::remove_dir_all(&directory)
+                .await
+                .map_err(|error| format!("无法删除抓取记录：{error}"))?;
+            continue;
+        }
         if capture.designs.is_empty() {
             tokio::fs::remove_dir_all(&directory)
                 .await
