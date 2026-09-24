@@ -146,7 +146,7 @@ git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.c
 git commit -m "chore(release): $version"
 git tag -a "$version" -m "$message"
 
-echo "已创建 $version。"
+echo "已创建 ${version}。"
 if [[ "$push_release" == true ]]; then
   branch="$(git symbolic-ref --short HEAD)"
   git push origin "$branch" "$version"
