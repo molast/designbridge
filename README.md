@@ -59,6 +59,17 @@ src-tauri/target/release/bundle
 
 > 默认跳过代码签名，适合本机安装和分发测试。
 
+### GitHub Actions 发布 macOS Apple Silicon
+
+推送 `v*` 格式的 Git tag 后，GitHub Actions 会自动使用 macOS Apple Silicon runner 构建并发布 arm64 DMG：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流文件为 `.github/workflows/release-macos-arm64.yml`。当前构建未配置 Apple Developer 签名与公证，用户首次打开时可能需要在 macOS 安全设置中允许运行。
+
 ---
 
 <a id="codex-plugin"></a>

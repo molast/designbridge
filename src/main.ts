@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ChevronDown, ChevronRight, Folder, Image as ImageIcon, RefreshCw, type LucideIcon } from "lucide-react";
@@ -102,6 +102,12 @@ type CapturedDesign = {
   remoteUrl: string;
   localPath: string | null;
   error: string | null;
+  layers?: InspectableLayer[];
+  slices?: CapturedSlice[];
+  sliceDownloadedCount?: number;
+  sliceFailedCount?: number;
+  sliceTotalCount?: number;
+  slicesComplete?: boolean;
 };
 
 type CapturedSlice = {
@@ -303,6 +309,11 @@ const deleteConfirmMessage = document.querySelector<HTMLElement>("#delete-confir
 const deleteConfirmError = document.querySelector<HTMLElement>("#delete-confirm-error")!;
 const deleteCancelButton = document.querySelector<HTMLButtonElement>("#delete-cancel-button")!;
 const deleteConfirmButton = document.querySelector<HTMLButtonElement>("#delete-confirm-button")!;
+const updateDialog = document.querySelector<HTMLDialogElement>("#update-dialog")!;
+const updateVersion = document.querySelector<HTMLElement>("#update-version")!;
+const updateReleaseName = document.querySelector<HTMLElement>("#update-release-name")!;
+const updateLaterButton = document.querySelector<HTMLButtonElement>("#update-later-button")!;
+const updateOpenButton = document.querySelector<HTMLButtonElement>("#update-open-button")!;
 const browserExtensionDialog = document.querySelector<HTMLDialogElement>("#browser-extension-dialog")!;
 const browserExtensionPath = document.querySelector<HTMLElement>("#browser-extension-path")!;
 const browserExtensionBrowsers = document.querySelector<HTMLElement>("#browser-extension-browsers")!;
@@ -319,6 +330,7 @@ urlInput.addEventListener("focus", () => {
     if (document.activeElement === urlInput) urlInput.select();
   }, 0);
 });
+urlInput.addEventListener("input", updateCaptureButtonState);
 
 buildInfo.textContent = `v${__APP_VERSION__} · ${__BUILD_MODE__}`;
 buildInfo.dataset.buildMode = __BUILD_MODE__;
@@ -375,6 +387,7 @@ const BROWSER_STORAGE_KEY = "designbridge.browser";
 let sidebarWidth = storedNumber(SIDEBAR_WIDTH_STORAGE_KEY, MIN_SIDEBAR_WIDTH);
 let sidebarCollapsed = storedValue(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true";
 let captureMethod: CaptureMethod = storedValue(CAPTURE_METHOD_STORAGE_KEY) === "webview" ? "webview" : "browser";
+let showingAllSlices = false;
 
 mountPhotoPreview(previewRoot);
 mountPlatformPicker(platformPickerRoot, changeTargetPlatform);
@@ -429,6 +442,31 @@ function removeStoredValue(key: string) {
     window.localStorage.removeItem(key);
   } catch {
     // The panel still works when storage is unavailable.
+  }
+}
+
+type AppUpdateInfo = {
+  available: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  releaseUrl: string;
+  releaseName: string;
+};
+
+async function checkForUpdates() {
+  try {
+    const update = await invoke<AppUpdateInfo>("check_for_update");
+    if (!update.available) return;
+    updateVersion.textContent = `v${update.latestVersion}`;
+    updateReleaseName.textContent = update.releaseName || "发现新的 DesignBridge 版本";
+    updateOpenButton.onclick = () => {
+      void openUrl(update.releaseUrl);
+      updateDialog.close();
+    };
+    updateLaterButton.onclick = () => updateDialog.close();
+    updateDialog.showModal();
+  } catch (error) {
+    console.warn("版本检查失败", error);
   }
 }
 
@@ -659,21 +697,34 @@ function sliceDensity(slice: CapturedSlice): string {
 }
 
 function captureLayers(capture: CaptureResult): InspectableLayer[] {
-  return capture.layers || [];
+  const design = currentDesign(capture);
+  return capture.dataVersion && capture.dataVersion >= 5 ? design?.layers || [] : capture.layers || [];
 }
 
 function slicesForLayer(capture: CaptureResult, layer: InspectableLayer): CapturedSlice[] {
-  const exactMatches = capture.slices.filter((slice) => slice.id === layer.id);
+  const slices = captureSlices(capture);
+  const exactMatches = slices.filter((slice) => slice.id === layer.id);
   if (exactMatches.length > 0 || !layer.hasSlice) return exactMatches;
-  return capture.slices.filter((slice) => slice.name === layer.name);
+  return slices.filter((slice) => slice.name === layer.name);
 }
 
 function sliceTotal(capture: CaptureResult): number {
-  return Math.max(capture.sliceTotalCount || 0, capture.slices.length);
+  const design = currentDesign(capture);
+  return capture.dataVersion && capture.dataVersion >= 5
+    ? Math.max(design?.sliceTotalCount || 0, captureSlices(capture).length)
+    : Math.max(capture.sliceTotalCount || 0, capture.slices.length);
 }
 
 function slicesComplete(capture: CaptureResult): boolean {
-  return capture.slicesComplete ?? true;
+  const design = currentDesign(capture);
+  return capture.dataVersion && capture.dataVersion >= 5
+    ? design?.slicesComplete ?? true
+    : capture.slicesComplete ?? true;
+}
+
+function captureSlices(capture: CaptureResult): CapturedSlice[] {
+  const design = currentDesign(capture);
+  return capture.dataVersion && capture.dataVersion >= 5 ? design?.slices || [] : capture.slices || [];
 }
 
 function currentCoordinate(): PlatformFrame | null {
@@ -700,6 +751,7 @@ function currentDesign(capture: CaptureResult | null = selectedCapture): Capture
 
 function selectDesignPage(designId: string, designName?: string) {
   if (!selectedCapture) return;
+  showingAllSlices = false;
   const matches = (item: CapturedDesign) => item.id === designId && (!designName || item.name === designName);
   const selectedDesign = selectedCapture.designs.find(matches);
   if (selectedDesignId === designId && selectedDesign?.localPath) {
@@ -712,6 +764,21 @@ function selectDesignPage(designId: string, designName?: string) {
   if (!design) return;
   // Keep navigation state visible while an uncached page is being fetched.
   selectedDesignId = designId;
+  const pageDataMissing = selectedCapture.dataVersion && selectedCapture.dataVersion >= 5
+    ? design.layers === undefined
+    : false;
+  if (captureGroupDesigns(selectedCapture).length > 1 && pageDataMissing) {
+    const sourceCapture = history.find((candidate) =>
+      candidate.projectId === selectedCapture?.projectId
+      && candidate.designs.some((item) => item.id === design.id && item.name === design.name),
+    );
+    const pageUrl = designPageUrl(sourceCapture?.sourceUrl || selectedCapture.sourceUrl, design.id);
+    if (pageUrl) {
+      pendingDesignSelection = { id: design.id, name: design.name };
+      void startCapture(pageUrl, { force: true });
+    }
+    return;
+  }
   if (!design.localPath) {
     const cachedCapture = history.find((capture) =>
       capture.captureId !== selectedCapture?.captureId && capture.designs.some(
@@ -883,7 +950,7 @@ function layerTypeLabel(type: string): string {
 }
 
 function previewItems(capture: CaptureResult): PreviewItem[] {
-  return capture.slices.flatMap((slice, index) => {
+  return captureSlices(capture).flatMap((slice, index) => {
       const src = localImageSource(slice.localPath);
       return !src || slice.error
         ? []
@@ -1148,7 +1215,7 @@ function failCaptureAttempt(key: string, message: string) {
 }
 
 function setCapturing(capturing: boolean) {
-  captureButton.disabled = capturing;
+  captureButton.disabled = capturing || !urlInput.value.trim();
   captureButton.textContent = capturing ? "抓取中…" : "开始抓取";
   cancelButton.classList.toggle("hidden", !capturing);
   urlInput.disabled = capturing;
@@ -1162,6 +1229,12 @@ function setCapturing(capturing: boolean) {
     activeCaptureKey = null;
   }
 }
+
+function updateCaptureButtonState() {
+  captureButton.disabled = urlInput.disabled || !urlInput.value.trim();
+}
+
+updateCaptureButtonState();
 
 function beginBrowserCapture(request: BrowserCaptureRequested) {
   clearError();
@@ -1868,6 +1941,7 @@ function renderCommentPopover(comment: DesignComment) {
 
 function renderSliceOutlines(capture: CaptureResult | null) {
   sliceOutlines.replaceChildren();
+  sliceOutlines.classList.toggle("is-all-slices", showingAllSlices);
   if (!capture) return;
   const coordinate = androidFrame(currentDesign(capture) || undefined);
   if (!coordinate) return;
@@ -1893,12 +1967,114 @@ function renderSliceOutlines(capture: CaptureResult | null) {
   sliceOutlines.append(fragment);
 }
 
+function sliceLayers(capture: CaptureResult): InspectableLayer[] {
+  return captureLayers(capture).filter((layer) =>
+    layer.visible && layer.hasSlice && layer.frame && layer.frame.width > 0 && layer.frame.height > 0,
+  );
+}
+
+function renderAllSlicesPanel(capture: CaptureResult) {
+  const layers = sliceLayers(capture);
+  const storedFormat = storedValue("designbridge.slice-export.format");
+  const format = storedFormat === "png" || storedFormat === "jpg" || storedFormat === "webp" ? storedFormat : "webp";
+  const storedScales = (() => {
+    try {
+      const value = JSON.parse(storedValue("designbridge.slice-export.android-scales") || "null");
+      return Array.isArray(value) && value.length > 0 ? value : ["xxhdpi"];
+    } catch {
+      return ["xxhdpi"];
+    }
+  })();
+  inspectorDetails.classList.remove("hidden");
+  designInspector.classList.add("details-open");
+  layerDetails.innerHTML = `
+    <section class="all-slices-panel">
+      <div class="all-slices-heading">
+        <h3>切图</h3>
+        <span class="all-slices-selected">已选 ${layers.length} 个切图</span>
+      </div>
+      <label class="all-slices-select-all">
+        <input type="checkbox" checked data-all-slices-select-all />
+        <span class="all-slice-check" aria-hidden="true">✓</span>
+        <span>全选</span>
+      </label>
+      <div class="all-slices-list">
+        ${layers.map((layer, index) => {
+          const slices = captureSlices(capture);
+          const slice = slices.find((item) => item.id === layer.id)
+            || slices.find((item) => item.name === layer.name);
+          const source = localImageSource(slice?.localPath || null);
+          const size = imageSize(slice?.width ?? layer.frame?.width ?? null, slice?.height ?? layer.frame?.height ?? null);
+          return `
+            <button class="all-slice-item" type="button" data-all-slice-index="${index}">
+              <span class="all-slice-check" aria-hidden="true">✓</span>
+              <span class="all-slice-image">${source ? `<img src="${escapeHtml(source)}" alt="" />` : ""}</span>
+              <span class="all-slice-copy">
+                <strong title="${escapeHtml(slice?.name || layer.name)}">${escapeHtml(slice?.name || layer.name)}</strong>
+                <small>${escapeHtml(size)}${layer.frame ? ` · ${numberValue(layer.frame.x)}, ${numberValue(layer.frame.y)}` : ""}</small>
+              </span>
+            </button>
+          `;
+        }).join("")}
+      </div>
+    </section>
+    <section class="all-slices-download">
+      <div class="all-slices-download-heading">
+        <h3>下载配置</h3>
+        <span>⌄</span>
+      </div>
+      <div class="all-slices-controls">
+        <label>
+          <span>下载切图样式</span>
+          <select data-all-slices-format>
+            <option value="png" ${format === "png" ? "selected" : ""}>PNG</option>
+            <option value="jpg" ${format === "jpg" ? "selected" : ""}>JPG</option>
+            <option value="webp" ${format === "webp" ? "selected" : ""}>WEBP</option>
+          </select>
+        </label>
+        <label>
+          <span>切图使用平台</span>
+          <select disabled>
+            <option>Android</option>
+          </select>
+        </label>
+      </div>
+      <div class="all-slices-scale-list">
+        ${["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"].map((scale) => `
+          <label>
+            <input type="checkbox" value="${scale}" data-all-slices-scale ${storedScales.includes(scale) ? "checked" : ""} />
+            <span>${scale === "mdpi" ? "mipmap-mdpi" : `mipmap-${scale}`}</span>
+          </label>
+        `).join("")}
+      </div>
+      <button class="slice-download-button all-slices-download-button" type="button" data-all-slices-download>
+        下载 ${layers.length} 个切图
+      </button>
+    </section>
+  `;
+  showSliceExportPanel(null);
+}
+
+function showAllSlices(capture: CaptureResult) {
+  showingAllSlices = true;
+  selectedLayerId = null;
+  selectedCommentId = null;
+  hitStack = null;
+  renderSliceOutlines(capture);
+  renderAllSlicesPanel(capture);
+}
+
 function renderLayerSelection() {
   const capture = selectedCapture;
   if (!capture) {
     showSliceExportPanel(null);
     return;
   }
+  if (showingAllSlices && !selectedLayerId && !selectedCommentId) {
+    renderAllSlicesPanel(capture);
+    return;
+  }
+  showingAllSlices = false;
   const layers = captureLayers(capture);
   const layer = layers.find((item) => item.id === selectedLayerId) || null;
   const design = currentDesign(capture);
@@ -2029,10 +2205,9 @@ function renderLayerSelection() {
   `;
 
   const slice = slicesForLayer(capture, layer)[0] || null;
-  const sliceIndex = slice ? capture.slices.indexOf(slice) : -1;
+  const sliceIndex = slice ? captureSlices(capture).indexOf(slice) : -1;
   showSliceExportPanel({
     captureId: capture.captureId,
-    outputDir: capture.outputDir,
     layerId: layer.id,
     layerName: layer.name,
     layerWidth: layer.frame?.width ?? null,
@@ -2054,6 +2229,7 @@ function renderLayerSelection() {
     onPreview: () => {
       if (sliceIndex >= 0) showPreview(`slice-${sliceIndex}`);
     },
+    onShowAllSlices: () => showAllSlices(capture),
   });
   renderCommentMarkers(capture);
   renderLayerMeasurements();
@@ -2221,12 +2397,6 @@ function updateSinglePageSlices(capture: CaptureResult): CaptureResult | null {
     if (existing) Object.assign(existing, incoming);
     else parent.designs.push(incoming);
   }
-  parent.slices = capture.slices;
-  parent.sliceDownloadedCount = capture.sliceDownloadedCount;
-  parent.sliceFailedCount = capture.sliceFailedCount;
-  parent.sliceTotalCount = capture.sliceTotalCount;
-  parent.slicesComplete = capture.slicesComplete;
-  parent.layers = capture.layers;
   return parent;
 }
 
@@ -2849,6 +3019,18 @@ artboardScroll.addEventListener(
 );
 
 layerDetails.addEventListener("click", (event) => {
+  const allSliceTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-all-slice-index]");
+  if (allSliceTarget && selectedCapture) {
+    const index = Number(allSliceTarget.dataset.allSliceIndex);
+    const layer = sliceLayers(selectedCapture)[index];
+    if (layer) {
+      showingAllSlices = false;
+      selectedLayerId = layer.id;
+      selectedCommentId = null;
+      renderLayerSelection();
+    }
+    return;
+  }
   const colorTarget = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-copy-color]");
   if (colorTarget) {
     void copyStyleColor(colorTarget.dataset.copyColor || "", colorTarget);
@@ -3148,6 +3330,8 @@ async function initialize() {
       historyList.scrollTop = savedScrollTop;
     });
   }
+
+  void checkForUpdates();
 }
 
 void initialize();

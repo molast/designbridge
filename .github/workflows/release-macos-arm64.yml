@@ -1,0 +1,50 @@
+name: Release macOS Apple Silicon
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-arm64:
+    name: Build macOS arm64
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and publish macOS arm64 DMG
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
+          releaseName: DesignBridge ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
+          releaseBody: macOS Apple Silicon (arm64) build.
+          releaseDraft: false
+          prerelease: false
+          args: --target aarch64-apple-darwin --bundles dmg --no-sign

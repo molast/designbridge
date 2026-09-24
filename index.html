@@ -169,6 +169,17 @@
       </div>
     </dialog>
 
+    <dialog class="confirm-dialog update-dialog" id="update-dialog" aria-labelledby="update-title" tabindex="-1">
+      <div class="confirm-dialog-content">
+        <h2 id="update-title">发现新版本 <span id="update-version"></span></h2>
+        <p id="update-release-name">有新的 DesignBridge 版本可用。</p>
+        <div class="confirm-dialog-actions">
+          <button class="secondary-button" id="update-later-button" type="button">稍后提醒</button>
+          <button class="primary-button" id="update-open-button" type="button">查看下载页</button>
+        </div>
+      </div>
+    </dialog>
+
     <dialog
       class="confirm-dialog browser-extension-dialog"
       id="browser-extension-dialog"

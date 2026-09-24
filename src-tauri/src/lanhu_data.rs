@@ -1161,7 +1161,7 @@ pub(crate) fn collect_slices(value: &serde_json::Value) -> Vec<LanhuSlicePayload
                         .unwrap_or_else(|| "untitled".to_string());
                     let id = value_string(value, &["web_id", "webId", "id"])
                         .unwrap_or_else(|| format!("slice-{}", output.len()));
-                    let key = format!("{name}\n{url}");
+                    let key = format!("{id}\n{name}\n{url}");
                     if seen.insert(key) {
                         output.push(LanhuSlicePayload {
                             id,

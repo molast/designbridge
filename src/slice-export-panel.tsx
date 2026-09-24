@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
-import { ChevronDown, Download, FolderOpen } from "lucide-react";
+import { ChevronDown, Download, Images } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { TargetPlatform } from "./platform-picker";
@@ -18,7 +17,6 @@ type SliceItem = {
 
 export type SliceExportRequest = {
   captureId: string;
-  outputDir: string;
   layerId: string;
   layerName: string;
   layerWidth: number | null;
@@ -29,6 +27,7 @@ export type SliceExportRequest = {
   slice: SliceItem | null;
   onPlatformChange: (platform: TargetPlatform) => void;
   onPreview: () => void;
+  onShowAllSlices: () => void;
 };
 
 type ExportResult = {
@@ -56,6 +55,38 @@ const IOS_SCALES: ScaleOption[] = [
   { key: "3x", label: "高清视网膜 @3x", factor: 3 },
 ];
 
+const SLICE_EXPORT_FORMAT_KEY = "designbridge.slice-export.format";
+const SLICE_EXPORT_ANDROID_SCALES_KEY = "designbridge.slice-export.android-scales";
+const SLICE_EXPORT_IOS_SCALES_KEY = "designbridge.slice-export.ios-scales";
+
+function readStoredScales(key: string, fallback: string[]): string[] {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(key) || "null");
+    return Array.isArray(value) && value.every((item) => typeof item === "string") && value.length > 0
+      ? value
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readStoredFormat(): ExportFormat {
+  try {
+    const value = window.localStorage.getItem(SLICE_EXPORT_FORMAT_KEY);
+    return value === "png" || value === "jpg" || value === "webp" ? value : "webp";
+  } catch {
+    return "webp";
+  }
+}
+
+function storeSliceExportSetting(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // The panel still works when storage is unavailable.
+  }
+}
+
 let currentRequest: SliceExportRequest | null = null;
 let updateRequest: ((request: SliceExportRequest | null) => void) | null = null;
 
@@ -75,12 +106,15 @@ function pixelSize(value: number | null, factor: number): string {
 
 function SliceExportPanel() {
   const [request, setRequest] = useState<SliceExportRequest | null>(currentRequest);
-  const [format, setFormat] = useState<ExportFormat>("webp");
-  const [androidScales, setAndroidScales] = useState<string[]>(["xxhdpi"]);
-  const [iosScales, setIosScales] = useState<string[]>(["1x", "2x", "3x"]);
+  const [format, setFormat] = useState<ExportFormat>(readStoredFormat);
+  const [androidScales, setAndroidScales] = useState<string[]>(() =>
+    readStoredScales(SLICE_EXPORT_ANDROID_SCALES_KEY, ["xxhdpi"]),
+  );
+  const [iosScales, setIosScales] = useState<string[]>(() =>
+    readStoredScales(SLICE_EXPORT_IOS_SCALES_KEY, ["1x", "2x", "3x"]),
+  );
   const [exporting, setExporting] = useState(false);
   const [feedback, setFeedback] = useState("");
-  const [exportDir, setExportDir] = useState<string | null>(null);
 
   useEffect(() => {
     updateRequest = setRequest;
@@ -90,12 +124,8 @@ function SliceExportPanel() {
   }, []);
 
   useEffect(() => {
-    setFormat("webp");
-    setAndroidScales(["xxhdpi"]);
-    setIosScales(["1x", "2x", "3x"]);
     setExporting(false);
     setFeedback("");
-    setExportDir(null);
   }, [request?.captureId, request?.layerId]);
 
   const scaleOptions = request?.platform === "ios" ? IOS_SCALES : ANDROID_SCALES;
@@ -106,11 +136,15 @@ function SliceExportPanel() {
   if (!request) return null;
 
   const toggleScale = (key: string) => {
-    setSelectedScales((current) =>
-      current.includes(key) ? current.filter((item) => item !== key) : [...current, key],
-    );
+    setSelectedScales((current) => {
+      const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key];
+      storeSliceExportSetting(
+        request.platform === "ios" ? SLICE_EXPORT_IOS_SCALES_KEY : SLICE_EXPORT_ANDROID_SCALES_KEY,
+        JSON.stringify(next),
+      );
+      return next;
+    });
     setFeedback("");
-    setExportDir(null);
   };
 
   const exportSlices = async () => {
@@ -128,8 +162,7 @@ function SliceExportPanel() {
           scales: selectedScales,
         },
       });
-      setExportDir(result.outputDir);
-      setFeedback(`已导出 ${result.files.length} 个文件`);
+      setFeedback(`已下载 ${result.files.length} 个文件`);
     } catch (error) {
       setFeedback(`导出失败：${String(error)}`);
     } finally {
@@ -176,9 +209,10 @@ function SliceExportPanel() {
             <select
               value={format}
               onChange={(event) => {
-                setFormat(event.target.value as ExportFormat);
+                const nextFormat = event.target.value as ExportFormat;
+                setFormat(nextFormat);
+                storeSliceExportSetting(SLICE_EXPORT_FORMAT_KEY, nextFormat);
                 setFeedback("");
-                setExportDir(null);
               }}
             >
               <option value="png">PNG</option>
@@ -195,7 +229,6 @@ function SliceExportPanel() {
               value={request.platform}
               onChange={(event) => {
                 setFeedback("");
-                setExportDir(null);
                 request.onPlatformChange(event.target.value as TargetPlatform);
               }}
             >
@@ -233,9 +266,9 @@ function SliceExportPanel() {
           <Download aria-hidden="true" size={16} />
           {exporting ? "正在导出…" : "下载切图"}
         </button>
-        <button className="slice-folder-button" type="button" onClick={() => void openPath(exportDir || request.outputDir)}>
-          <FolderOpen aria-hidden="true" size={16} />
-          {exportDir ? "打开导出目录" : "查看所有切图"}
+        <button className="slice-folder-button" type="button" onClick={request.onShowAllSlices}>
+          <Images aria-hidden="true" size={16} />
+          查看所有切图
         </button>
       </div>
       {feedback ? <p className={feedback.startsWith("导出失败") ? "slice-export-feedback error-text" : "slice-export-feedback"}>{feedback}</p> : null}

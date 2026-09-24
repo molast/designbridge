@@ -38,6 +38,37 @@ pub(crate) async fn list_saved_captures(app: tauri::AppHandle) -> Result<Vec<Cap
     Ok(captures)
 }
 
+#[tauri::command]
+pub(crate) async fn check_for_update() -> Result<AppUpdateInfo, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(format!("DesignBridge/{APP_VERSION}"))
+        .build()
+        .map_err(|error| format!("无法创建更新检查客户端：{error}"))?;
+    let release_body = client
+        .get("https://api.github.com/repos/molast/designbridge/releases/latest")
+        .send()
+        .await
+        .map_err(|error| format!("无法检查更新：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("无法读取最新版本：{error}"))?
+        .text()
+        .await
+        .map_err(|error| format!("无法读取最新版本内容：{error}"))?;
+    let release = serde_json::from_str::<GithubRelease>(&release_body)
+        .map_err(|error| format!("无法解析最新版本：{error}"))?;
+    let latest_version = release.tag_name.trim_start_matches('v').to_string();
+    let available = !release.draft
+        && !release.prerelease
+        && version_tuple(&latest_version) > version_tuple(APP_VERSION);
+    Ok(AppUpdateInfo {
+        available,
+        current_version: APP_VERSION.to_string(),
+        latest_version,
+        release_url: release.html_url,
+        release_name: release.name.unwrap_or_default(),
+    })
+}
+
 pub(crate) fn valid_capture_id(capture_id: &str) -> bool {
     !capture_id.is_empty()
         && capture_id.len() <= 80
@@ -155,15 +186,19 @@ pub(crate) async fn export_slice_variants(
         .or_else(|| slice.height.map(|height| height / source_scale))
         .ok_or_else(|| "切图高度无效".to_string())?;
 
-    let output_root = capture_dir.join("exports").join(&platform);
+    let output_root = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("无法确定下载目录：{error}"))?;
     let base_name = sanitize_filename(&slice.name);
+    let direct_file = targets.len() == 1;
     let mut files = Vec::with_capacity(targets.len());
     for target in targets {
         let width = export_dimension(logical_width, target.factor)?;
         let height = export_dimension(logical_height, target.factor)?;
         let resized = source_image.resize_exact(width, height, FilterType::Lanczos3);
         let encoded = encode_export_image(&resized, &format)?;
-        let target_dir = if target.directory.is_empty() {
+        let target_dir = if direct_file || target.directory.is_empty() {
             output_root.clone()
         } else {
             output_root.join(target.directory)

@@ -97,6 +97,35 @@
     }
 
     #[test]
+    fn keeps_same_named_slices_when_their_layer_ids_differ() {
+        let design_json = serde_json::json!({
+            "layers": [
+                {
+                    "id": "slice-a",
+                    "name": "icon/general/enter",
+                    "isAsset": true,
+                    "images": {"png_xxxhd": "https://alipic.lanhuapp.com/enter.png"},
+                    "width": 12,
+                    "height": 12
+                },
+                {
+                    "id": "slice-b",
+                    "name": "icon/general/enter",
+                    "isAsset": true,
+                    "images": {"png_xxxhd": "https://alipic.lanhuapp.com/enter.png"},
+                    "width": 12,
+                    "height": 12
+                }
+            ]
+        });
+
+        let slices = collect_slices(&design_json);
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0].id, "slice-a");
+        assert_eq!(slices[1].id, "slice-b");
+    }
+
+    #[test]
     fn reads_android_coordinate_space_from_artboard_frame() {
         let design_json = serde_json::json!({
             "artboard": {
@@ -428,6 +457,12 @@
                 remote_url: "https://example.com/design.png".to_string(),
                 local_path: local_path.map(str::to_string),
                 error: error.map(str::to_string),
+                layers: Vec::new(),
+                slices: Vec::new(),
+                slice_downloaded_count: 0,
+                slice_failed_count: 0,
+                slice_total_count: 0,
+                slices_complete: true,
             }
         }
 

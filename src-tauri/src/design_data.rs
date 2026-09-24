@@ -55,6 +55,18 @@ pub struct CapturedDesign {
     pub remote_url: String,
     pub local_path: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub layers: Vec<InspectableLayer>,
+    #[serde(default)]
+    pub slices: Vec<CapturedSlice>,
+    #[serde(default)]
+    pub slice_downloaded_count: usize,
+    #[serde(default)]
+    pub slice_failed_count: usize,
+    #[serde(default)]
+    pub slice_total_count: usize,
+    #[serde(default = "default_true")]
+    pub slices_complete: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

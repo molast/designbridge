@@ -1124,6 +1124,12 @@ mod tests {
             remote_url: String::new(),
             local_path: None,
             error: None,
+            layers: Vec::new(),
+            slices: Vec::new(),
+            slice_downloaded_count: 0,
+            slice_failed_count: 0,
+            slice_total_count: 0,
+            slices_complete: true,
         };
         let comment = DesignComment {
             id: "comment-1".to_string(),

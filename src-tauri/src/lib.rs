@@ -47,8 +47,16 @@ const MAX_BROWSER_MESSAGE_BYTES: usize = 256 * 1024;
 const BROWSER_EXTENSION_ID: &str = "gdpjdkhhfielmlddencemafipiebldcf";
 const BROWSER_NATIVE_HOST_NAME: &str = "com.designbridge.browser";
 const BROWSER_EXTENSION_VERSION: &str = "0.3.2";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BROWSER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(8);
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn version_tuple(value: &str) -> [u64; 3] {
+    let normalized = value.trim().trim_start_matches('v');
+    let core = normalized.split(['-', '+']).next().unwrap_or(normalized);
+    let mut parts = core.split('.').map(|part| part.parse::<u64>().unwrap_or(0));
+    [parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0)]
+}
 
 #[derive(Default)]
 struct CaptureRuntime {
@@ -238,6 +246,25 @@ struct ExportedSliceFile {
 struct ExportSliceResult {
     output_dir: String,
     files: Vec<ExportedSliceFile>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateInfo {
+    available: bool,
+    current_version: String,
+    latest_version: String,
+    release_url: String,
+    release_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+    name: Option<String>,
+    draft: bool,
+    prerelease: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1645,6 +1672,12 @@ fn captured_design_metadata(design: &LanhuDesignPayload) -> CapturedDesign {
         remote_url: design.url.clone(),
         local_path: None,
         error: None,
+        layers: Vec::new(),
+        slices: Vec::new(),
+        slice_downloaded_count: 0,
+        slice_failed_count: 0,
+        slice_total_count: 0,
+        slices_complete: true,
     }
 }
 
@@ -1732,7 +1765,8 @@ async fn download_slice(
         }
     };
     if should_skip_slice(&decoded) {
-        return None;
+        captured.error = Some("切图为空像素或 1 × 1 px，无法生成预览".to_string());
+        return Some(captured);
     }
 
     // Lanhu's source URL is the xxxhdpi bitmap. Android xxhdpi is 3/4 of it.
@@ -1802,6 +1836,7 @@ async fn download_slices_in_background(
     output_dir: PathBuf,
     mut result: CaptureResult,
     pending_slices: Vec<LanhuSlicePayload>,
+    design_id: String,
 ) {
     let total = pending_slices.len();
     let mut slices = Vec::with_capacity(total);
@@ -1835,6 +1870,13 @@ async fn download_slices_in_background(
     result.slice_failed_count = slices.iter().filter(|slice| slice.error.is_some()).count();
     result.slices = slices;
     result.slices_complete = true;
+    if let Some(design) = result.designs.iter_mut().find(|design| design.id == design_id) {
+        design.slices = result.slices.clone();
+        design.slice_downloaded_count = result.slice_downloaded_count;
+        design.slice_failed_count = result.slice_failed_count;
+        design.slice_total_count = result.slice_total_count;
+        design.slices_complete = true;
+    }
 
     match write_capture_metadata(&app, &result.capture_id, &output_dir, &result).await {
         Ok(true) => {
@@ -1926,13 +1968,19 @@ async fn persist_project(
     // captures and are loaded on demand. They are not failed downloads.
     let failed_count = failed_design_count(&designs);
     let slice_total_count = pending_slices.len();
+    let primary_design_id = designs.first().map(|design| design.id.clone());
+    if let Some(design) = designs.first_mut() {
+        design.layers = layers.clone();
+        design.slice_total_count = slice_total_count;
+        design.slices_complete = slice_total_count == 0;
+    }
     let captured_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let result = CaptureResult {
         capture_id: capture_id.to_string(),
-        data_version: 4,
+        data_version: 5,
         captured_at,
         source_url: source_url.to_string(),
         resolved_url,
@@ -1971,6 +2019,7 @@ async fn persist_project(
             output_dir,
             result.clone(),
             pending_slices,
+            primary_design_id.expect("slice downloads require a design"),
         ));
     }
     Ok(result)
@@ -2143,6 +2192,7 @@ pub fn run() {
             start_browser_extension_capture,
             cancel_lanhu_capture,
             list_saved_captures,
+            check_for_update,
             export_slice_variants,
             delete_saved_capture,
             delete_saved_designs,
