@@ -8,6 +8,15 @@
     }
 
     #[test]
+    fn compares_only_stable_three_part_release_versions() {
+        assert!(release_version("v0.1.10") > release_version("0.1.9"));
+        assert_eq!(release_version("v0.2.0"), Some([0, 2, 0]));
+        assert_eq!(release_version("manual-123"), None);
+        assert_eq!(release_version("v0.2.0-beta.1"), None);
+        assert_eq!(release_version("v0.2"), None);
+    }
+
+    #[test]
     fn extracts_route_from_hash_query() {
         let url = lanhu_url("https://lanhuapp.com/web/#/item/project/detailDetach?tid=t1&pid=p1&project_id=p1&image_id=i1&child=c1").unwrap();
         let route = lanhu_route(&url);

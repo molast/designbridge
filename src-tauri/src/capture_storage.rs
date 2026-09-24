@@ -42,10 +42,11 @@ pub(crate) async fn list_saved_captures(app: tauri::AppHandle) -> Result<Vec<Cap
 pub(crate) async fn check_for_update() -> Result<AppUpdateInfo, String> {
     let client = reqwest::Client::builder()
         .user_agent(format!("DesignBridge/{APP_VERSION}"))
+        .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| format!("无法创建更新检查客户端：{error}"))?;
     let release_body = client
-        .get("https://api.github.com/repos/molast/designbridge/releases/latest")
+        .get(format!("https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"))
         .send()
         .await
         .map_err(|error| format!("无法检查更新：{error}"))?
@@ -59,7 +60,16 @@ pub(crate) async fn check_for_update() -> Result<AppUpdateInfo, String> {
     let latest_version = release.tag_name.trim_start_matches('v').to_string();
     let available = !release.draft
         && !release.prerelease
-        && version_tuple(&latest_version) > version_tuple(APP_VERSION);
+        && release_version(&release.tag_name)
+            .zip(release_version(APP_VERSION))
+            .is_some_and(|(latest, current)| latest > current)
+        && release.assets.iter().any(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            asset.state == "uploaded"
+                && asset.size > 0
+                && name.ends_with(".dmg")
+                && (name.contains("aarch64") || name.contains("arm64"))
+        });
     Ok(AppUpdateInfo {
         available,
         current_version: APP_VERSION.to_string(),

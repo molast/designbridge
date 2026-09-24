@@ -48,14 +48,25 @@ const BROWSER_EXTENSION_ID: &str = "gdpjdkhhfielmlddencemafipiebldcf";
 const BROWSER_NATIVE_HOST_NAME: &str = "com.designbridge.browser";
 const BROWSER_EXTENSION_VERSION: &str = "0.3.2";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const UPDATE_REPOSITORY: &str = if cfg!(debug_assertions) {
+    "molast/picbind"
+} else {
+    "molast/designbridge"
+};
 const BROWSER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(8);
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-fn version_tuple(value: &str) -> [u64; 3] {
-    let normalized = value.trim().trim_start_matches('v');
-    let core = normalized.split(['-', '+']).next().unwrap_or(normalized);
-    let mut parts = core.split('.').map(|part| part.parse::<u64>().unwrap_or(0));
-    [parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0)]
+fn release_version(value: &str) -> Option<[u64; 3]> {
+    let version = value.strip_prefix('v').unwrap_or(value);
+    let parts = version.split('.').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some([
+        parts[0].parse().ok()?,
+        parts[1].parse().ok()?,
+        parts[2].parse().ok()?,
+    ])
 }
 
 #[derive(Default)]
@@ -265,6 +276,14 @@ struct GithubRelease {
     name: Option<String>,
     draft: bool,
     prerelease: bool,
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    size: u64,
+    state: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -37,6 +37,19 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Read release notes from tag
+        id: release_notes
+        run: |
+          notes="$(git tag -l --format='%(contents)' "$GITHUB_REF_NAME")"
+          if [[ -z "$notes" ]]; then
+            notes="macOS Apple Silicon (arm64) build."
+          fi
+          {
+            echo 'body<<RELEASE_NOTES'
+            echo "$notes"
+            echo 'RELEASE_NOTES'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish macOS arm64 DMG
         uses: tauri-apps/tauri-action@v0
         env:
@@ -44,7 +57,7 @@ jobs:
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
           releaseName: DesignBridge ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
-          releaseBody: macOS Apple Silicon (arm64) build.
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: --target aarch64-apple-darwin --bundles dmg --no-sign

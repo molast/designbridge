@@ -70,6 +70,15 @@ git push origin v0.1.0
 
 工作流文件为 `.github/workflows/release-macos-arm64.yml`。当前构建未配置 Apple Developer 签名与公证，用户首次打开时可能需要在 macOS 安全设置中允许运行。
 
+推荐使用发布脚本创建版本、写入更新内容并推送 tag：
+
+```bash
+./release.sh -m "修复切图导出问题"
+./release.sh -v v0.1.1 -m "新增版本升级提示"
+```
+
+首次发布且远程和本地都没有 tag 时，脚本会使用项目当前版本创建初始 tag，例如项目版本为 `0.1.0` 就创建 `v0.1.0`。后续省略 `-v` 时，脚本优先读取 GitHub 远程最新 `vX.Y.Z` tag 并递增 patch 版本，例如 `v0.1.0` 自动生成 `v0.1.1`；远程不可用时回退到本地 tag。手动传入 `-v` 时，脚本会同步修改项目版本号。脚本会创建提交和 annotated tag，并推送到远程触发 GitHub Actions；使用 `--no-push` 可只在本地准备发布内容。
+
 ---
 
 <a id="codex-plugin"></a>
