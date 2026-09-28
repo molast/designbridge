@@ -1,6 +1,6 @@
 [package]
 name = "designbridge"
-version = "0.1.0"
+version = "0.1.1"
 description = "DesignBridge desktop application"
 authors = ["you"]
 edition = "2021"
