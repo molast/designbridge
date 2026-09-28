@@ -266,6 +266,7 @@ struct AppUpdateInfo {
     current_version: String,
     latest_version: String,
     release_url: String,
+    download_url: String,
     release_name: String,
 }
 
@@ -282,6 +283,7 @@ struct GithubRelease {
 #[derive(Debug, Deserialize)]
 struct GithubReleaseAsset {
     name: String,
+    browser_download_url: String,
     size: u64,
     state: String,
 }
@@ -1389,6 +1391,10 @@ fn poll_lanhu_capture(
                         return;
                     }
                     Err(error) if is_retryable_lanhu_error(&error) => {
+                        if attempt >= 3 {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
                         emit_progress(
                             &app,
                             &capture_id,
@@ -1403,6 +1409,10 @@ fn poll_lanhu_capture(
                     }
                 }
             } else if attempt % 5 == 0 {
+                if attempt >= 3 {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
                 emit_progress(&app, &capture_id, "authorize", "等待蓝湖登录完成…", 16);
             }
             std::thread::sleep(std::time::Duration::from_millis(1500));
@@ -2069,6 +2079,7 @@ fn start_lanhu_capture(
     .inner_size(900.0, 620.0)
     .min_inner_size(700.0, 480.0)
     .center()
+    .visible(false)
     .initialization_script(capture_script(&capture_id))
     .on_document_title_changed(move |window, title| {
         let _ = window.set_title("蓝湖授权与抓取");

@@ -16,7 +16,12 @@
           <div>
             <strong>DesignBridge</strong>
             <span>蓝湖资源抓取</span>
-            <span class="build-info" id="build-info"></span>
+            <div class="brand-version-row">
+              <span class="build-info" id="build-info"></span>
+              <button class="update-indicator hidden" id="update-indicator" type="button" aria-label="发现新版本">
+                <span aria-hidden="true">↑</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -47,6 +52,7 @@
             <button class="primary-button" id="capture-button" type="submit">开始抓取</button>
             <button class="secondary-button hidden" id="cancel-button" type="button">取消</button>
           </div>
+          <div class="link-history hidden" id="link-history" role="listbox" aria-label="链接历史"></div>
           <p class="field-error hidden" id="field-error" role="alert"></p>
         </form>
 
@@ -78,6 +84,13 @@
         <aside class="sidebar" id="sidebar" aria-label="抓取记录">
           <div class="sidebar-surface" id="sidebar-surface">
             <div class="page-list-panel hidden" id="page-list-panel">
+              <div class="page-list-toolbar">
+                <label class="page-list-filter">
+                  <span class="sr-only">筛选页面</span>
+                  <input id="page-filter-input" type="search" placeholder="筛选页面" autocomplete="off" />
+                </label>
+                <button class="page-list-refresh" id="page-list-refresh" type="button" aria-label="刷新页面列表" title="刷新页面列表"></button>
+              </div>
               <button class="page-list-heading" id="page-list-toggle" type="button" aria-expanded="true">
                 <span>页面</span><span class="page-list-chevron" aria-hidden="true">⌃</span>
               </button>
@@ -130,9 +143,6 @@
                   </div>
                 </header>
                 <div class="artboard-scroll" id="artboard-scroll">
-                  <aside class="canvas-page-rail hidden" id="canvas-page-rail" aria-label="当前画板页面">
-                    <div class="canvas-page-list" id="canvas-page-list"></div>
-                  </aside>
                   <div class="artboard-wrap" id="artboard-wrap">
                     <img id="artboard-image" alt="" draggable="false" />
                     <div class="slice-outlines" id="slice-outlines" aria-hidden="true"></div>
@@ -165,17 +175,6 @@
         <div class="confirm-dialog-actions">
           <button class="secondary-button" id="delete-cancel-button" type="button">取消</button>
           <button class="danger-button" id="delete-confirm-button" type="button">删除</button>
-        </div>
-      </div>
-    </dialog>
-
-    <dialog class="confirm-dialog update-dialog" id="update-dialog" aria-labelledby="update-title" tabindex="-1">
-      <div class="confirm-dialog-content">
-        <h2 id="update-title">发现新版本 <span id="update-version"></span></h2>
-        <p id="update-release-name">有新的 DesignBridge 版本可用。</p>
-        <div class="confirm-dialog-actions">
-          <button class="secondary-button" id="update-later-button" type="button">稍后提醒</button>
-          <button class="primary-button" id="update-open-button" type="button">查看下载页</button>
         </div>
       </div>
     </dialog>

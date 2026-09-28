@@ -70,6 +70,14 @@ git push origin v0.1.0
 
 工作流文件为 `.github/workflows/release-macos-arm64.yml`。当前构建未配置 Apple Developer 签名与公证，用户首次打开时可能需要在 macOS 安全设置中允许运行。
 
+如果 macOS 提示“DesignBridge.app 已损坏，无法打开”，请确认应用来自可信的 GitHub 发布页面，然后在终端执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/DesignBridge.app"
+```
+
+如果应用不在“应用程序”文件夹中，请将命令中的路径替换为实际路径。执行后重新打开应用即可。
+
 推荐使用发布脚本创建版本、写入更新内容并推送 tag：
 
 ```bash

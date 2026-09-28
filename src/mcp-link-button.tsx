@@ -83,8 +83,8 @@ function McpLinkButton() {
         className={`mcp-link-button mcp-refresh-button${isRefreshing ? " is-refreshing" : ""}`}
         type="button"
         disabled={isRefreshing}
-        aria-label={isRefreshing ? "正在刷新设计稿" : "强制刷新设计稿"}
-        title={isRefreshing ? "正在刷新设计稿" : "重新从蓝湖抓取并替换当前设计稿"}
+        aria-label={isRefreshing ? "正在刷新当前页面" : "刷新当前页面"}
+        title={isRefreshing ? "正在刷新当前页面" : "重新从蓝湖抓取当前页面"}
         onClick={() => refreshDesign?.()}
         onPointerUp={(event) => event.currentTarget.blur()}
       >

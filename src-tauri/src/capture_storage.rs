@@ -58,23 +58,30 @@ pub(crate) async fn check_for_update() -> Result<AppUpdateInfo, String> {
     let release = serde_json::from_str::<GithubRelease>(&release_body)
         .map_err(|error| format!("无法解析最新版本：{error}"))?;
     let latest_version = release.tag_name.trim_start_matches('v').to_string();
-    let available = !release.draft
-        && !release.prerelease
-        && release_version(&release.tag_name)
-            .zip(release_version(APP_VERSION))
-            .is_some_and(|(latest, current)| latest > current)
-        && release.assets.iter().any(|asset| {
+    let download_url = release
+        .assets
+        .iter()
+        .find(|asset| {
             let name = asset.name.to_ascii_lowercase();
             asset.state == "uploaded"
                 && asset.size > 0
                 && name.ends_with(".dmg")
                 && (name.contains("aarch64") || name.contains("arm64"))
-        });
+        })
+        .map(|asset| asset.browser_download_url.clone())
+        .unwrap_or_default();
+    let available = !release.draft
+        && !release.prerelease
+        && release_version(&release.tag_name)
+            .zip(release_version(APP_VERSION))
+            .is_some_and(|(latest, current)| latest > current)
+        && !download_url.is_empty();
     Ok(AppUpdateInfo {
         available,
         current_version: APP_VERSION.to_string(),
         latest_version,
         release_url: release.html_url,
+        download_url,
         release_name: release.name.unwrap_or_default(),
     })
 }
