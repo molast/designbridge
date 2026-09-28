@@ -48,11 +48,7 @@ const BROWSER_EXTENSION_ID: &str = "gdpjdkhhfielmlddencemafipiebldcf";
 const BROWSER_NATIVE_HOST_NAME: &str = "com.designbridge.browser";
 const BROWSER_EXTENSION_VERSION: &str = "0.3.2";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const UPDATE_REPOSITORY: &str = if cfg!(debug_assertions) {
-    "molast/picbind"
-} else {
-    "molast/designbridge"
-};
+const UPDATE_REPOSITORY: &str = "molast/designbridge";
 const BROWSER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(8);
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
