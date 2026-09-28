@@ -150,7 +150,7 @@ echo "已创建 ${version}。"
 if [[ "$push_release" == true ]]; then
   branch="$(git symbolic-ref --short HEAD)"
   git push origin "$branch" "$version"
-  echo "已推送 $version，GitHub Actions 将开始构建 macOS Apple Silicon DMG。"
+  echo "已推送 ${version}，GitHub Actions 将开始构建 macOS Apple Silicon DMG。"
 else
   echo "未推送远程。需要发布时执行：git push origin HEAD $version"
 fi
