@@ -374,6 +374,7 @@ let activeCurrentPageRefreshKey: string | null = null;
 let selectedHistoryKey: string | null = null;
 let pendingDeleteCaptureId: string | null = null;
 let pendingDeleteDesigns: { projectId: string; designIds: string[]; title: string; deleteCapture?: boolean } | null = null;
+let pendingPageRecapture: { collectionUrl: string; designId: string; designName: string } | null = null;
 let pendingClearCache = false;
 let inspectorFitFrame = 0;
 let sidebarResizeState: { pointerId: number; startX: number; width: number } | null = null;
@@ -2790,6 +2791,7 @@ function updateLayerCursor(clientX: number, clientY: number) {
 function closeDeleteDialog() {
   pendingDeleteCaptureId = null;
   pendingDeleteDesigns = null;
+  pendingPageRecapture = null;
   pendingClearCache = false;
   deleteConfirmTitle.textContent = "删除抓取记录";
   deleteConfirmButton.disabled = false;
@@ -2832,6 +2834,21 @@ function requestDesignDeletion(projectId: string, designId: string, title: strin
   deleteConfirmDialog.focus({ preventScroll: true });
 }
 
+function requestCurrentPageRecapture() {
+  if (!selectedCapture) return;
+  const design = currentDesign(selectedCapture);
+  if (!design) return;
+  const parentCapture = isSinglePageSource(selectedCapture.sourceUrl)
+    ? findParentCaptureForPage(selectedCapture)
+    : selectedCapture;
+  pendingPageRecapture = {
+    collectionUrl: parentCapture?.sourceUrl || selectedCapture.sourceUrl,
+    designId: design.id,
+    designName: design.name,
+  };
+  requestDesignDeletion(selectedCapture.projectId, design.id, design.name);
+}
+
 function requestClearCache() {
   pendingClearCache = true;
   deleteConfirmTitle.textContent = "清除全部缓存";
@@ -2846,6 +2863,7 @@ function requestClearCache() {
 async function confirmCaptureDeletion() {
   const capture = history.find((item) => item.captureId === pendingDeleteCaptureId);
   const designDeletion = pendingDeleteDesigns;
+  const pageRecapture = pendingPageRecapture;
   const clearCache = pendingClearCache;
   if (!capture && !designDeletion && !clearCache) {
     closeDeleteDialog();
@@ -2868,6 +2886,16 @@ async function confirmCaptureDeletion() {
     }
     history = dedupeHistory(await invoke<CaptureResult[]>("list_saved_captures"));
     closeDeleteDialog();
+    if (pageRecapture) {
+      pendingDesignSelection = {
+        id: pageRecapture.designId,
+        name: pageRecapture.designName,
+      };
+      activeCurrentPageRefreshKey = captureSourceKey(pageRecapture.collectionUrl);
+      setStatus("页面已删除，正在重新抓取", "working");
+      void startCapture(pageRecapture.collectionUrl, { force: true, recordHistory: false });
+      return;
+    }
     const remainingGroup = designDeletion && designDeletion.designIds.length === 1
       ? history.find((item) => item.projectId === designDeletion.projectId && captureGroupDesigns(item).length > 0) || null
       : null;
@@ -2898,17 +2926,7 @@ type StartCaptureOptions = {
 };
 
 function refreshSelectedDesign() {
-  if (!selectedCapture) return;
-  const design = currentDesign(selectedCapture);
-  if (!design) return;
-  const sourceCapture = selectedDesignCaptureId
-    ? history.find((capture) => capture.captureId === selectedDesignCaptureId)
-    : null;
-  const pageUrl = designPageUrl(sourceCapture?.sourceUrl || selectedCapture.sourceUrl, design.id);
-  if (!pageUrl) return;
-  pendingDesignSelection = { id: design.id, name: design.name };
-  activeCurrentPageRefreshKey = captureSourceKey(pageUrl);
-  void startCapture(pageUrl, { force: true, recordHistory: false });
+  requestCurrentPageRecapture();
 }
 
 function refreshSelectedPageList() {

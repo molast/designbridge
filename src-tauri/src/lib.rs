@@ -1287,7 +1287,9 @@ fn lanhu_http_client(cookie: &str, auth_token: &str) -> Result<Client, String> {
     );
     headers.insert(
         header::USER_AGENT,
-        header::HeaderValue::from_static("Mozilla/5.0 DesignBridge/0.1"),
+        header::HeaderValue::from_static(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        ),
     );
     headers.insert(
         header::HeaderName::from_static("request-from"),
@@ -1387,6 +1389,11 @@ fn poll_lanhu_capture(
                         return;
                     }
                     Err(error) if is_retryable_lanhu_error(&error) => {
+                        if is_rate_limited_lanhu_error(&error) && attempt >= 5 {
+                            take_source(&app.state::<CaptureRuntime>(), &capture_id);
+                            emit_failure(&app, &capture_id, "蓝湖接口暂时拒绝请求（HTTP 418），请稍后重试");
+                            return;
+                        }
                         if attempt >= 3 {
                             let _ = window.show();
                             let _ = window.set_focus();
@@ -1400,6 +1407,7 @@ fn poll_lanhu_capture(
                         );
                     }
                     Err(error) => {
+                        take_source(&app.state::<CaptureRuntime>(), &capture_id);
                         emit_failure(&app, &capture_id, error);
                         return;
                     }
@@ -1413,6 +1421,7 @@ fn poll_lanhu_capture(
             }
             std::thread::sleep(std::time::Duration::from_millis(1500));
         }
+        take_source(&app.state::<CaptureRuntime>(), &capture_id);
         emit_failure(
             &app,
             &capture_id,
@@ -1428,8 +1437,15 @@ fn is_retryable_lanhu_error(error: &str) -> bool {
         || lower.contains("登录")
         || lower.contains("401")
         || lower.contains("403")
+        || lower.contains("418")
+        || lower.contains("teapot")
         || lower.contains("暂未返回")
         || lower.contains("json")
+}
+
+fn is_rate_limited_lanhu_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("418") || lower.contains("teapot")
 }
 
 async fn fetch_lanhu_project(
@@ -1939,7 +1955,7 @@ async fn persist_project(
         .map_err(|error| format!("无法创建抓取目录：{error}"))?;
 
     let client = Client::builder()
-        .user_agent("Mozilla/5.0 DesignBridge/0.1")
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .referer(true)
         .redirect(Policy::custom(|attempt| {
             if attempt.previous().len() >= 5 {

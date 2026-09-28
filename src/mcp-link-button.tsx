@@ -1,4 +1,4 @@
-import { Check, Copy, RefreshCw } from "lucide-react";
+import { Check, Copy, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -83,13 +83,13 @@ function McpLinkButton() {
         className={`mcp-link-button mcp-refresh-button${isRefreshing ? " is-refreshing" : ""}`}
         type="button"
         disabled={isRefreshing}
-        aria-label={isRefreshing ? "正在刷新当前页面" : "刷新当前页面"}
-        title={isRefreshing ? "正在刷新当前页面" : "重新从蓝湖抓取当前页面"}
+        aria-label={isRefreshing ? "正在删除并重新抓取当前页面" : "删除并重新抓取当前页面"}
+        title={isRefreshing ? "正在删除并重新抓取当前页面" : "删除当前页面资源后重新抓取"}
         onClick={() => refreshDesign?.()}
         onPointerUp={(event) => event.currentTarget.blur()}
       >
-        <RefreshCw aria-hidden="true" size={15} strokeWidth={1.8} />
-        <span>{isRefreshing ? "刷新中" : "刷新"}</span>
+        {isRefreshing ? <RefreshCw aria-hidden="true" size={15} strokeWidth={1.8} /> : <Trash2 aria-hidden="true" size={15} strokeWidth={1.8} />}
+        <span>{isRefreshing ? "处理中" : "删除并重抓"}</span>
       </button>
       <button
         className="mcp-link-button"

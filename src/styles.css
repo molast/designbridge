@@ -416,7 +416,8 @@ button:disabled {
 }
 
 .sidebar {
-  --sidebar-width: 220px;
+  --sidebar-min-width: 220px;
+  --sidebar-width: var(--sidebar-min-width);
   position: fixed;
   z-index: 12;
   top: 66px;
@@ -431,7 +432,7 @@ button:disabled {
   position: absolute;
   inset: 0;
   width: var(--sidebar-width);
-  min-width: 220px;
+  min-width: var(--sidebar-min-width);
   display: flex;
   flex-direction: column;
   padding: 16px 10px;

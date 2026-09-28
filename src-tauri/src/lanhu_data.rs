@@ -38,37 +38,44 @@ pub(crate) async fn request_lanhu_json(
     client: &Client,
     url: Url,
 ) -> Result<serde_json::Value, String> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| format!("蓝湖接口请求失败：{error}"))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("读取蓝湖接口响应失败：{error}"))?;
-    if !status.is_success() {
-        return Err(format!("蓝湖接口返回 HTTP {status}"));
-    }
-    let value = serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|_| "蓝湖接口返回的不是 JSON，可能尚未完成登录".to_string())?;
-    if let Some(code) = value.get("code") {
-        let success = code
-            .as_str()
-            .map(|value| value == "00000" || value == "0")
-            .or_else(|| code.as_i64().map(|value| value == 0))
-            .unwrap_or(false);
-        if !success {
-            let message = value
-                .get("msg")
-                .or_else(|| value.get("message"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("蓝湖未授权当前请求");
-            return Err(message.to_string());
+    for attempt in 0..3 {
+        let response = client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|error| format!("蓝湖接口请求失败：{error}"))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("读取蓝湖接口响应失败：{error}"))?;
+        if status.as_u16() == 418 && attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(700 * (attempt + 1))).await;
+            continue;
         }
+        if !status.is_success() {
+            return Err(format!("蓝湖接口返回 HTTP {status}"));
+        }
+        let value = serde_json::from_str::<serde_json::Value>(&body)
+            .map_err(|_| "蓝湖接口返回的不是 JSON，可能尚未完成登录".to_string())?;
+        if let Some(code) = value.get("code") {
+            let success = code
+                .as_str()
+                .map(|value| value == "00000" || value == "0")
+                .or_else(|| code.as_i64().map(|value| value == 0))
+                .unwrap_or(false);
+            if !success {
+                let message = value
+                    .get("msg")
+                    .or_else(|| value.get("message"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("蓝湖未授权当前请求");
+                return Err(message.to_string());
+            }
+        }
+        return Ok(value);
     }
-    Ok(value)
+    unreachable!("蓝湖接口请求重试循环未返回")
 }
 
 pub(crate) fn response_data(value: &serde_json::Value) -> &serde_json::Value {
