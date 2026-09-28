@@ -351,7 +351,6 @@ let selectedDesignName: string | null = null;
 let selectedDesignCaptureId: string | null = null;
 let selectedPageMenuId: string | null = null;
 let pendingDesignSelection: { id: string; name: string } | null = null;
-let preserveViewportOnNextRender = false;
 let pageGroupCollapsed = false;
 let pageFilterQuery = "";
 let selectedPlatform: TargetPlatform = "android";
@@ -383,6 +382,7 @@ let installedBrowserExtensionPath: string | null = null;
 const MIN_CANVAS_ZOOM = 4;
 const MAX_CANVAS_ZOOM = 400;
 const CANVAS_ZOOM_STEPS = [4, 8, 12.5, 25, 50, 75, 100, 125, 150, 200, 300, 400];
+const CANVAS_VIEWPORT_STORAGE_KEY = "designbridge.canvas.viewport.v2";
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 420;
 const SIDEBAR_WIDTH_STORAGE_KEY = "designbridge.sidebar.width";
@@ -400,6 +400,34 @@ let showingAllSlices = false;
 let linkHistoryEntries: LinkHistoryEntry[] = loadLinkHistory();
 let favoriteDesignKeys = loadFavoriteDesignKeys();
 const favoriteLinkRequests = new Set<string>();
+
+function loadCanvasViewport(): { zoom: number; panX: number; panY: number; initialized: boolean } {
+  try {
+    const value = JSON.parse(storedValue(CANVAS_VIEWPORT_STORAGE_KEY) || "null");
+    if (!value || typeof value !== "object") throw new Error("invalid viewport");
+    const zoom = Number(value.zoom);
+    const panX = Number(value.panX);
+    const panY = Number(value.panY);
+    return {
+      zoom: Number.isFinite(zoom) ? Math.max(MIN_CANVAS_ZOOM, Math.min(MAX_CANVAS_ZOOM, zoom)) : 100,
+      panX: Number.isFinite(panX) ? panX : 0,
+      panY: Number.isFinite(panY) ? panY : 0,
+      initialized: Number.isFinite(panX) && Number.isFinite(panY),
+    };
+  } catch {
+    return { zoom: 100, panX: 0, panY: 0, initialized: false };
+  }
+}
+
+function persistCanvasViewport() {
+  storeValue(CANVAS_VIEWPORT_STORAGE_KEY, JSON.stringify({ zoom: canvasZoom, panX: canvasPanX, panY: canvasPanY }));
+}
+
+const storedCanvasViewport = loadCanvasViewport();
+canvasZoom = storedCanvasViewport.zoom;
+canvasPanX = storedCanvasViewport.panX;
+canvasPanY = storedCanvasViewport.panY;
+let canvasPositionInitialized = storedCanvasViewport.initialized;
 
 function loadFavoriteDesignKeys(): Set<string> {
   try {
@@ -1060,6 +1088,16 @@ function applyCanvasPan() {
   window.requestAnimationFrame(positionCommentPopover);
 }
 
+function centerCanvas() {
+  const containerBounds = artboardScroll.getBoundingClientRect();
+  const canvasBounds = artboardWrap.getBoundingClientRect();
+  canvasPanX = (containerBounds.width - canvasBounds.width) / 2;
+  canvasPanY = (containerBounds.height - canvasBounds.height) / 2;
+  canvasPositionInitialized = true;
+  applyCanvasPan();
+  persistCanvasViewport();
+}
+
 function setCanvasZoom(nextZoom: number, anchor?: { x: number; y: number }) {
   const next = Math.max(MIN_CANVAS_ZOOM, Math.min(MAX_CANVAS_ZOOM, nextZoom));
   if (!Number.isFinite(next)) return;
@@ -1083,6 +1121,7 @@ function setCanvasZoom(nextZoom: number, anchor?: { x: number; y: number }) {
     canvasPanY += anchorPoint.y - newAnchorY;
     applyCanvasPan();
   }
+  persistCanvasViewport();
 }
 
 function steppedZoom(direction: -1 | 1): number {
@@ -1524,8 +1563,9 @@ function findParentCaptureForPage(capture: CaptureResult): CaptureResult | null 
   return history.find(isParentCapture) || null;
 }
 
-function designIdentity(design: CapturedDesign): string {
-  return `${design.id}\u0000${design.name}`;
+function designPageKey(sourceUrl: string, designId: string): string | null {
+  const pageUrl = designPageUrl(sourceUrl, designId);
+  return pageUrl ? captureSourceKey(pageUrl) : null;
 }
 
 function prunePagesRemovedByListRefresh(
@@ -1533,11 +1573,20 @@ function prunePagesRemovedByListRefresh(
   refreshedCapture: CaptureResult,
 ): string[] {
   if (!previousCapture || isSinglePageSource(refreshedCapture.sourceUrl)) return [];
-  const refreshedDesigns = new Set(refreshedCapture.designs.map(designIdentity));
+  const refreshedDesigns = new Set(
+    refreshedCapture.designs
+      .map((design) => designPageKey(refreshedCapture.sourceUrl, design.id))
+      .filter((key): key is string => Boolean(key)),
+  );
   const removedDesigns = new Set(
     previousCapture.designs
-      .filter((design) => !refreshedDesigns.has(designIdentity(design)))
-      .map(designIdentity),
+      .map((design) => ({
+        design,
+        key: designPageKey(previousCapture.sourceUrl, design.id),
+      }))
+      .filter((item): item is { design: CapturedDesign; key: string } =>
+        item.key !== null && !refreshedDesigns.has(item.key),
+      ),
   );
   if (!removedDesigns.size) return [];
 
@@ -1546,7 +1595,10 @@ function prunePagesRemovedByListRefresh(
       capture.projectId === refreshedCapture.projectId
       && isSinglePageSource(capture.sourceUrl)
       && capture.designs.length > 0
-      && capture.designs.every((design) => removedDesigns.has(designIdentity(design))),
+      && capture.designs.every((design) => {
+        const key = designPageKey(capture.sourceUrl, design.id);
+        return Boolean(key) && [...removedDesigns].some((item) => item.key === key);
+      }),
     )
     .map((capture) => capture.captureId);
   const staleCaptureIdSet = new Set(staleCaptureIds);
@@ -1558,8 +1610,8 @@ function prunePagesRemovedByListRefresh(
       .flatMap((capture) => capture.designs.map((design) => design.id)),
   );
   let favoritesChanged = false;
-  for (const identity of removedDesigns) {
-    const designId = identity.slice(0, identity.indexOf("\u0000"));
+  for (const { design } of removedDesigns) {
+    const designId = design.id;
     if (retainedCollectionDesignIds.has(designId)) continue;
     favoritesChanged = favoriteDesignKeys.delete(`${refreshedCapture.projectId}:${designId}`) || favoritesChanged;
   }
@@ -1797,6 +1849,8 @@ function renderEmptyCapture(state?: { title: string; detail: string }) {
   showSliceExportPanel(null);
   canvasPanX = 0;
   canvasPanY = 0;
+  canvasPositionInitialized = false;
+  removeStoredValue(CANVAS_VIEWPORT_STORAGE_KEY);
   applyCanvasPan();
   updatePlatformPicker(null);
   showMcpLinkButton(null);
@@ -2439,22 +2493,7 @@ function renderLayerSelection() {
   renderLayerMeasurements();
 }
 
-function capturesSharePageGroup(previous: CaptureResult | null, next: CaptureResult): boolean {
-  if (!previous || previous.projectId !== next.projectId) return false;
-  const previousId = currentDesign(previous)?.id;
-  const nextIds = new Set(next.designs.map((design) => design.id));
-  if (previousId && nextIds.has(previousId)) return true;
-  const nextId = next.designs.find((design) => design.error == null)?.id;
-  if (!previousId || !nextId) return false;
-  return history.some((candidate) => {
-    const ids = new Set(captureGroupDesigns(candidate).map((design) => design.id));
-    return ids.size > 1 && ids.has(previousId) && ids.has(nextId);
-  });
-}
-
 function renderCapture(capture: CaptureResult) {
-  const preserveViewport = preserveViewportOnNextRender || capturesSharePageGroup(selectedCapture, capture);
-  preserveViewportOnNextRender = false;
   setSelectedHistoryKey(captureSourceKey(capture.sourceUrl));
   selectedCapture = capture;
   const folderPages = displayedHistoryDesigns(capture);
@@ -2498,13 +2537,13 @@ function renderCapture(capture: CaptureResult) {
   showMcpLinkButton(designMcpTarget(capture, design));
   canvasTitle.textContent = design.name;
   artboardImage.alt = design.name;
-  if (!preserveViewport) {
-    canvasZoom = 100;
-    canvasPanX = 0;
-    canvasPanY = 0;
+  if (coordinate) {
+    applyCanvasZoom();
+    if (!canvasPositionInitialized) centerCanvas();
+    else applyCanvasPan();
+  } else {
+    applyCanvasPan();
   }
-  applyCanvasPan();
-  if (coordinate) applyCanvasZoom();
   artboardImage.src = source;
   renderSliceOutlines(capture);
   renderCommentMarkers(capture);
@@ -3276,6 +3315,7 @@ artboardScroll.addEventListener(
     canvasPanX -= event.deltaX;
     canvasPanY -= event.deltaY;
     applyCanvasPan();
+    persistCanvasViewport();
   },
   { passive: false },
 );
@@ -3385,6 +3425,7 @@ function finishArtboardPointer(event: PointerEvent, cancelled = false) {
     artboardImage.releasePointerCapture(event.pointerId);
   }
   if (!cancelled && !moved) selectLayerAt(event.clientX, event.clientY);
+  if (moved && !cancelled) persistCanvasViewport();
   updateLayerCursor(event.clientX, event.clientY);
 }
 
@@ -3503,7 +3544,6 @@ async function initialize() {
           && selectedDesignName === incoming.name),
       );
       pendingDesignSelection = null;
-      preserveViewportOnNextRender = true;
       renderCapture(parentCapture);
       if (shouldSelectIncoming) {
         selectDesignPage(incoming.id, incoming.name);
@@ -3513,7 +3553,6 @@ async function initialize() {
       pendingDesignSelection = null;
       history = dedupeHistory([payload, ...history.filter((item) => captureSourceKey(item.sourceUrl) !== key)]);
       staleCaptureIds = prunePagesRemovedByListRefresh(replacedCapture, payload);
-      if (pending) preserveViewportOnNextRender = true;
       renderCapture(payload);
       if (pending && payload.designs.some((design) => design.id === pending.id && design.name === pending.name)) {
         selectDesignPage(pending.id, pending.name);

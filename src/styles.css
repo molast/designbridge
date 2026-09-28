@@ -1643,13 +1643,10 @@ h2 {
 
 .artboard-wrap {
   position: absolute;
-  top: 50%;
-  left: 50%;
+  top: 0;
+  left: 0;
   overflow: visible;
-  transform: translate(
-    calc(-50% + var(--canvas-pan-x, 0px)),
-    calc(-50% + var(--canvas-pan-y, 0px))
-  );
+  transform: translate(var(--canvas-pan-x, 0px), var(--canvas-pan-y, 0px));
   will-change: transform;
   background: #ffffff;
   box-shadow: 0 2px 12px rgba(24, 29, 34, 0.12);
