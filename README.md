@@ -68,9 +68,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流文件为 `.github/workflows/release-macos-arm64.yml`。正式发布必须配置 Apple Developer 签名与公证，工作流会在构建前检查这些配置，未配置时不会发布未签名 DMG。
-
-请在 GitHub 仓库的 **Settings → Secrets and variables → Actions** 中添加以下 Secrets：`APPLE_CERTIFICATE`（Developer ID Application 证书的 base64 内容）、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`（建议使用 app-specific password）和 `APPLE_TEAM_ID`。证书需要属于 Apple Developer 账号，并启用 Developer ID Application 与公证权限。
+工作流文件为 `.github/workflows/release-macos-arm64.yml`。项目目前没有 Apple Developer 账号，因此发布的是未签名 DMG，不需要配置额外的 GitHub Secrets。下载后首次打开时，macOS 可能会拦截应用，需要按下面的步骤移除下载隔离属性。
 
 如果 macOS 提示“DesignBridge.app 已损坏，无法打开”，请确认应用来自可信的 GitHub 发布页面，然后在终端执行：
 
