@@ -73,7 +73,7 @@ git push origin v0.1.0
 如果 macOS 提示“DesignBridge.app 已损坏，无法打开”，请确认应用来自可信的 GitHub 发布页面，然后在终端执行：
 
 ```bash
-xattr -dr com.apple.quarantine "$HOME/Downloads/DesignBridge_*.dmg"
+xattr -dr com.apple.quarantine "$HOME"/Downloads/DesignBridge_*.dmg
 xattr -dr com.apple.quarantine "/Applications/DesignBridge.app"
 codesign --force --deep --sign - "/Applications/DesignBridge.app"
 open "/Applications/DesignBridge.app"
