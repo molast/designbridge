@@ -639,6 +639,38 @@ pub(crate) fn color_token(value: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn gradient_stops(value: &serde_json::Value) -> Vec<LayerGradientStop> {
+    let stops = value
+        .get("gradientStops")
+        .or_else(|| value.get("stops"))
+        .or_else(|| value.pointer("/gradient/stops"))
+        .and_then(serde_json::Value::as_array);
+    stops.into_iter().flatten().filter_map(|stop| {
+        let position = stop
+            .get("position")
+            .or_else(|| stop.get("offset"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let color = color_value(stop);
+        let opacity = finite_number(stop, &["opacity"])
+            .or_else(|| {
+                stop.pointer("/color/opacity")
+                    .and_then(serde_json::Value::as_f64)
+            })
+            .unwrap_or(1.0);
+        if color.is_some() || stop.get("position").is_some() || stop.get("offset").is_some() {
+            Some(LayerGradientStop {
+                position,
+                color,
+                opacity,
+            })
+        } else {
+            None
+        }
+    })
+    .collect()
+}
+
 pub(crate) fn layer_paints(value: &serde_json::Value) -> Vec<LayerPaint> {
     value
         .pointer("/style/fills")
@@ -655,6 +687,7 @@ pub(crate) fn layer_paints(value: &serde_json::Value) -> Vec<LayerPaint> {
             color: color_value(fill),
             token: color_token(fill),
             opacity: finite_number(fill, &["opacity"]).unwrap_or(1.0),
+            gradient_stops: gradient_stops(fill),
         })
         .collect()
 }

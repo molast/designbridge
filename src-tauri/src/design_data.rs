@@ -121,11 +121,21 @@ pub struct LayerRadius {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct LayerGradientStop {
+    pub position: f64,
+    pub color: Option<String>,
+    pub opacity: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct LayerPaint {
     pub paint_type: String,
     pub color: Option<String>,
     pub token: Option<String>,
     pub opacity: f64,
+    #[serde(default)]
+    pub gradient_stops: Vec<LayerGradientStop>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

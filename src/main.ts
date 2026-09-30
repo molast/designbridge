@@ -142,6 +142,13 @@ type LayerPaint = {
   color: string | null;
   token: string | null;
   opacity: number;
+  gradientStops?: LayerGradientStop[];
+};
+
+type LayerGradientStop = {
+  position: number;
+  color: string | null;
+  opacity: number;
 };
 
 type LayerBorder = {
@@ -1899,13 +1906,23 @@ function renderCaptureAttempt(attempt: CaptureAttempt) {
 }
 
 function paintMarkup(paint: LayerPaint): string {
-  const copyValue = paint.color || "";
+  const stops = paint.gradientStops || [];
+  const gradientValue = stops.length
+    ? stops.map((stop) => `${stop.color || "transparent"} ${Math.round(stop.position * 100)}%`).join(", ")
+    : "";
+  const copyValue = paint.color || gradientValue;
+  const swatch = stops.length
+    ? `linear-gradient(90deg, ${stops.map((stop) => `${safeCssColor(stop.color)} ${Math.round(stop.position * 100)}%`).join(", ")})`
+    : safeCssColor(paint.color);
+  const valueLabel = stops.length
+    ? stops.map((stop) => `${colorLabel(stop.color)} ${Math.round(stop.position * 100)}%`).join(" · ")
+    : paint.paintType.toLowerCase().includes("gradient") ? "渐变值未记录" : colorLabel(paint.color);
   return `
     <button class="style-color-row style-color-copy-action" type="button" data-copy-color="${escapeHtml(copyValue)}" title="复制颜色值">
-      <span class="color-swatch" style="--swatch-color:${safeCssColor(paint.color)}"></span>
+      <span class="color-swatch" style="--swatch-color:${swatch}"></span>
       <span class="style-color-copy">
         <strong>${escapeHtml(paint.token || paint.paintType)}</strong>
-        <small>${escapeHtml(colorLabel(paint.color))} · ${escapeHtml(paintOpacityLabel(paint))}</small>
+        <small class="${stops.length ? "style-gradient-value" : ""}">${escapeHtml(valueLabel)} · ${escapeHtml(paintOpacityLabel(paint))}</small>
       </span>
     </button>
   `;
