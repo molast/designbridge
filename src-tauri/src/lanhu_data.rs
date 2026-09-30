@@ -640,17 +640,38 @@ pub(crate) fn color_token(value: &serde_json::Value) -> Option<String> {
 }
 
 fn gradient_stops(value: &serde_json::Value) -> Vec<LayerGradientStop> {
-    let stops = value
-        .get("gradientStops")
-        .or_else(|| value.get("stops"))
-        .or_else(|| value.pointer("/gradient/stops"))
-        .and_then(serde_json::Value::as_array);
+    fn find_stops(value: &serde_json::Value) -> Option<&[serde_json::Value]> {
+        if let Some(object) = value.as_object() {
+            for key in ["gradientStops", "colorStops", "stops"] {
+                if let Some(stops) = object.get(key).and_then(serde_json::Value::as_array) {
+                    return Some(stops);
+                }
+            }
+            for child in object.values() {
+                if let Some(stops) = find_stops(child) {
+                    return Some(stops);
+                }
+            }
+        } else if let Some(items) = value.as_array() {
+            for child in items {
+                if let Some(stops) = find_stops(child) {
+                    return Some(stops);
+                }
+            }
+        }
+        None
+    }
+
+    let stops = find_stops(value);
     stops.into_iter().flatten().filter_map(|stop| {
-        let position = stop
+        let mut position = stop
             .get("position")
             .or_else(|| stop.get("offset"))
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0);
+        if position > 1.0 {
+            position /= 100.0;
+        }
         let color = color_value(stop);
         let opacity = finite_number(stop, &["opacity"])
             .or_else(|| {
