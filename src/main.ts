@@ -1917,6 +1917,24 @@ function paintMarkup(paint: LayerPaint): string {
   const valueLabel = stops.length
     ? stops.map((stop) => `${colorLabel(stop.color)} ${Math.round(stop.position * 100)}%`).join(" · ")
     : paint.paintType.toLowerCase().includes("gradient") ? "渐变值未记录" : colorLabel(paint.color);
+  if (stops.length) {
+    const stopRows = stops.map((stop, index) => `
+      <div class="gradient-stop-row">
+        <span class="gradient-stop-marker ${index === 0 ? "is-first" : ""} ${index === stops.length - 1 ? "is-last" : ""}" style="--swatch-color:${safeCssColor(stop.color)}"></span>
+        ${index === 0 ? '<span class="gradient-chevron" aria-hidden="true"></span>' : ""}
+        <span class="gradient-stop-details">
+          <span class="gradient-stop-value"><strong>${escapeHtml(colorLabel(stop.color))}</strong><span>${escapeHtml(`${Math.round(Math.max(0, Math.min(1, stop.opacity * paint.opacity)) * 100)}%`)}</span></span>
+          <small>HEX</small>
+        </span>
+      </div>
+    `).join("");
+    return `
+      <div class="gradient-paint">
+        <div class="gradient-paint-heading"><strong>${escapeHtml(paint.token || paint.paintType)}</strong><span>${escapeHtml(paintOpacityLabel(paint))}</span></div>
+        <div class="gradient-stop-list">${stopRows}</div>
+      </div>
+    `;
+  }
   return `
     <button class="style-color-row style-color-copy-action" type="button" data-copy-color="${escapeHtml(copyValue)}" title="复制颜色值">
       <span class="color-swatch" style="--swatch-color:${swatch}"></span>

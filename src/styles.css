@@ -2349,6 +2349,125 @@ h2 {
   margin-top: 9px;
 }
 
+.gradient-paint {
+  display: grid;
+  gap: 10px;
+}
+
+.gradient-paint-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #3b3f3c;
+  font-size: 11px;
+}
+
+.gradient-paint-heading span {
+  color: #858a87;
+  font-size: 10px;
+}
+
+.gradient-stop-list {
+  display: grid;
+  gap: 10px;
+}
+
+.gradient-stop-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 70px 30px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-height: 60px;
+}
+
+.gradient-stop-marker {
+  position: relative;
+  grid-column: 1;
+  width: 36px;
+  height: 36px;
+  margin-top: 2px;
+  border: 1px solid #d9ddda;
+  border-radius: 7px;
+  background: var(--swatch-color);
+}
+
+.gradient-stop-marker::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 7px;
+  height: 7px;
+  border: 1px solid #ffffff;
+  border-radius: 50%;
+  background: var(--swatch-color);
+  box-shadow: 0 0 0 1px #e1e4e1;
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.gradient-chevron {
+  position: absolute;
+  top: 10px;
+  left: 70px;
+  width: 12px;
+  height: 12px;
+  border-right: 2px solid #747782;
+  border-bottom: 2px solid #747782;
+  transform: rotate(45deg);
+}
+
+.gradient-stop-details {
+  grid-column: 3;
+}
+
+.gradient-stop-marker.is-first::before,
+.gradient-stop-marker.is-last::before {
+  position: absolute;
+  left: 50%;
+  width: 1px;
+  background: #d8dcda;
+  content: "";
+  transform: translateX(-50%);
+}
+
+.gradient-stop-marker.is-first::before {
+  top: 100%;
+  height: 40px;
+}
+
+.gradient-stop-marker.is-last::before {
+  bottom: 100%;
+  height: 40px;
+}
+
+.gradient-stop-details {
+  display: grid;
+  gap: 8px;
+}
+
+.gradient-stop-value {
+  display: flex;
+  justify-content: space-between;
+  min-height: 38px;
+  align-items: center;
+  padding: 0 12px;
+  border-radius: 6px;
+  background: #f7f8fb;
+  color: #34383c;
+  font-size: 12px;
+}
+
+.gradient-stop-value strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.gradient-stop-details small {
+  color: #a8aab3;
+  font-size: 10px;
+}
+
 .color-swatch,
 .layer-slice-image {
   background-color: #ffffff;
