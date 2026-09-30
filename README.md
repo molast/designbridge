@@ -68,12 +68,15 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流文件为 `.github/workflows/release-macos-arm64.yml`。项目目前没有 Apple Developer 账号，因此发布的是未签名 DMG，不需要配置额外的 GitHub Secrets。下载后首次打开时，macOS 可能会拦截应用，需要按下面的步骤移除下载隔离属性。
+工作流文件为 `.github/workflows/release-macos-arm64.yml`。项目目前没有 Apple Developer 账号，发布流程使用 macOS ad-hoc 签名，不需要配置额外的 GitHub Secrets。下载后首次打开时，macOS 仍可能要求手动允许应用运行。
 
 如果 macOS 提示“DesignBridge.app 已损坏，无法打开”，请确认应用来自可信的 GitHub 发布页面，然后在终端执行：
 
 ```bash
+xattr -dr com.apple.quarantine "$HOME/Downloads/DesignBridge_*.dmg"
 xattr -dr com.apple.quarantine "/Applications/DesignBridge.app"
+codesign --force --deep --sign - "/Applications/DesignBridge.app"
+open "/Applications/DesignBridge.app"
 ```
 
 如果应用不在“应用程序”文件夹中，请将命令中的路径替换为实际路径。执行后重新打开应用即可。

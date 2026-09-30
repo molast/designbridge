@@ -33,6 +33,9 @@
   },
   "bundle": {
     "active": true,
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "targets": "all",
     "resources": {
       "generated-resources/designbridge-installer/": "designbridge-installer/"
